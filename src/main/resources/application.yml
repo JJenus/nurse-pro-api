@@ -1,0 +1,11 @@
+# application.yml (base)
+spring:
+  application:
+    name:nurse-pro-api:
+  profiles:
+    active: dev
+jwt:
+  secret: your-secure-jwt-secret-key-here-32-chars-minimum
+  expiration: 86400000 # 24 hours in milliseconds
+  refresh:
+    expiration: 604800000 # 7 days in milliseconds
