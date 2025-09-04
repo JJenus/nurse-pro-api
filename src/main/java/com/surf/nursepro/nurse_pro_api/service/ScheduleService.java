@@ -1,5 +1,6 @@
 package com.surf.nursepro.nurse_pro_api.service;
 
+import com.itextpdf.text.Paragraph;
 import com.surf.nursepro.nurse_pro_api.dto.ApiResponse;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationParams;
 import com.surf.nursepro.nurse_pro_api.entity.*;
@@ -13,8 +14,16 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.stream.Collectors;
+
+// Excel imports
+import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.apache.poi.xssf.usermodel.XSSFColor;
+import java.io.ByteArrayOutputStream;
+
 
 @Service
 @RequiredArgsConstructor
@@ -415,6 +424,386 @@ public class ScheduleService {
         List<WorkloadData> workloadData = workloadDataRepository.findByNurseIdAndMonthAndYear(nurseId, month, year);
         logger.debug("Retrieved {} workload data entries for nurse {}", workloadData.size(), nurseId);
         return new ApiResponse<>(workloadData, "Workload data retrieved successfully", true);
+    }
+
+    @Transactional(readOnly = true)
+    public ApiResponse<byte[]> exportSchedulesi(List<Integer> months, int year, String format) {
+        if (months == null || months.isEmpty() || months.stream().anyMatch(m -> m < 1 || m > 12) || year < 2000) {
+            logger.warn("Invalid export parameters: months={}, year={}", months, year);
+            throw new IllegalArgumentException("Invalid months or year");
+        }
+        if (!format.equalsIgnoreCase("pdf") && !format.equalsIgnoreCase("excel")) {
+            logger.warn("Invalid export format: {}", format);
+            throw new IllegalArgumentException("Invalid format, must be 'pdf' or 'excel'");
+        }
+
+        List<Schedule> schedules = scheduleRepository.findByMonthInAndYear(months, year);
+        if (schedules.isEmpty()) {
+            logger.warn("No schedules found for months {} and year {}", months, year);
+            throw new IllegalArgumentException("No schedules found for the specified months and year");
+        }
+
+        try {
+            byte[] fileContent;
+            String fileName;
+            if (format.equalsIgnoreCase("pdf")) {
+                fileContent = generatePdf(schedules);
+                fileName = "schedules-" + year + "-" + months.stream().map(String::valueOf).collect(Collectors.joining("_")) + ".pdf";
+            } else {
+                fileContent = generateExcel(schedules);
+                fileName = "schedules-" + year + "-" + months.stream().map(String::valueOf).collect(Collectors.joining("_")) + ".xlsx";
+            }
+            logger.info("Exported {} schedules for months {} and year {} as {}", schedules.size(), months, year, format);
+            return new ApiResponse<>(fileContent, "Schedules exported successfully", true);
+        } catch (Exception e) {
+            logger.error("Error generating {} export: {}", format, e.getMessage());
+            throw new IllegalArgumentException("Failed to generate export: " + e.getMessage());
+        }
+    }
+
+    @Transactional(readOnly = true)
+    public ApiResponse<byte[]> exportSchedules(List<Integer> months, int year, String format) {
+        if (months == null || months.isEmpty() || months.stream().anyMatch(m -> m < 1 || m > 12) || year < 2000) {
+            logger.warn("Invalid export parameters: months={}, year={}", months, year);
+            throw new IllegalArgumentException("Invalid months or year");
+        }
+        if (!format.equalsIgnoreCase("pdf") && !format.equalsIgnoreCase("excel")) {
+            logger.warn("Invalid export format: {}", format);
+            throw new IllegalArgumentException("Invalid format, must be 'pdf' or 'excel'");
+        }
+
+        List<Schedule> schedules = scheduleRepository.findByMonthInAndYear(months, year);
+        if (schedules.isEmpty()) {
+            logger.warn("No schedules found for months {} and year {}", months, year);
+            throw new IllegalArgumentException("No schedules found for the specified months and year");
+        }
+
+        try {
+            byte[] fileContent;
+            String fileName;
+            if (format.equalsIgnoreCase("pdf")) {
+                fileContent = generatePdf(schedules);
+                fileName = "schedules-" + year + "-" + months.stream().map(String::valueOf).collect(Collectors.joining("_")) + ".pdf";
+            } else {
+                fileContent = generateExcel(schedules);
+                fileName = "schedules-" + year + "-" + months.stream().map(String::valueOf).collect(Collectors.joining("_")) + ".xlsx";
+            }
+            logger.info("Exported {} schedules for months {} and year {} as {}", schedules.size(), months, year, format);
+            return new ApiResponse<>(fileContent, "Schedules exported successfully", true);
+        } catch (Exception e) {
+            logger.error("Error generating {} export: {}", format, e.getMessage());
+            throw new IllegalArgumentException("Failed to generate export: " + e.getMessage());
+        }
+    }
+
+    private byte[] generatePdf(List<Schedule> schedules) throws com.itextpdf.text.DocumentException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        com.itextpdf.text.Document document = new com.itextpdf.text.Document(com.itextpdf.text.PageSize.A4.rotate());
+        com.itextpdf.text.pdf.PdfWriter.getInstance(document, baos);
+        document.open();
+
+        // Title
+        com.itextpdf.text.Font titleFont = new com.itextpdf.text.Font(com.itextpdf.text.Font.FontFamily.HELVETICA, 16, com.itextpdf.text.Font.BOLD);
+        com.itextpdf.text.Paragraph title = new com.itextpdf.text.Paragraph("Nurse Schedule Export", titleFont);
+        title.setAlignment(com.itextpdf.text.Element.ALIGN_CENTER);
+        title.setSpacingAfter(20);
+        document.add(title);
+
+        // Shift times legend
+        com.itextpdf.text.Font legendFont = new com.itextpdf.text.Font(com.itextpdf.text.Font.FontFamily.HELVETICA, 10);
+        com.itextpdf.text.Paragraph legend = new com.itextpdf.text.Paragraph(
+                "Shift Times: Day (07:00–15:00) • Evening (15:00–23:00) • Night (23:00–07:00)",
+                legendFont
+        );
+        legend.setAlignment(com.itextpdf.text.Element.ALIGN_CENTER);
+        legend.setSpacingAfter(15);
+        document.add(legend);
+
+        for (Schedule schedule : schedules) {
+            // Schedule header
+            Paragraph scheduleHeader = getScheduleHeader(schedule);
+            document.add(scheduleHeader);
+
+            // Group shifts by week
+            Map<LocalDate, List<Shift>> shiftsByDate = schedule.getShifts().stream()
+                    .collect(Collectors.groupingBy(Shift::getDate));
+
+            List<LocalDate> sortedDates = shiftsByDate.keySet().stream()
+                    .sorted()
+                    .toList();
+
+            // Process by weeks
+            int daysPerPage = 7; // One week per page/table
+            for (int weekStart = 0; weekStart < sortedDates.size(); weekStart += daysPerPage) {
+                int weekEnd = Math.min(weekStart + daysPerPage, sortedDates.size());
+                List<LocalDate> weekDates = sortedDates.subList(weekStart, weekEnd);
+
+                // Create table for the week: Shift Type + 7 days
+                com.itextpdf.text.pdf.PdfPTable table = new com.itextpdf.text.pdf.PdfPTable(weekDates.size() + 1); // +1 for shift type column
+                table.setWidthPercentage(100);
+                table.setSpacingBefore(10);
+                table.setSpacingAfter(20);
+
+                // Table headers - Days of week
+                com.itextpdf.text.pdf.PdfPCell shiftTypeHeader = new com.itextpdf.text.pdf.PdfPCell(
+                        new com.itextpdf.text.Phrase("Shift", new com.itextpdf.text.Font(com.itextpdf.text.Font.FontFamily.HELVETICA, 10, com.itextpdf.text.Font.BOLD))
+                );
+                shiftTypeHeader.setBackgroundColor(new com.itextpdf.text.BaseColor(240, 240, 240));
+                shiftTypeHeader.setPadding(5);
+                table.addCell(shiftTypeHeader);
+
+                for (LocalDate date : weekDates) {
+                    com.itextpdf.text.pdf.PdfPCell dateHeader = new com.itextpdf.text.pdf.PdfPCell(
+                            new com.itextpdf.text.Phrase(
+                                    date.format(DateTimeFormatter.ofPattern("EEE d")),
+                                    new com.itextpdf.text.Font(com.itextpdf.text.Font.FontFamily.HELVETICA, 10, com.itextpdf.text.Font.BOLD)
+                            )
+                    );
+                    dateHeader.setBackgroundColor(new com.itextpdf.text.BaseColor(240, 240, 240));
+                    dateHeader.setPadding(5);
+                    table.addCell(dateHeader);
+                }
+
+                // Add rows for each shift type
+                for (ShiftType shiftType : ShiftType.values()) {
+                    // Shift type cell
+                    com.itextpdf.text.pdf.PdfPCell shiftTypeCell = new com.itextpdf.text.pdf.PdfPCell(
+                            new com.itextpdf.text.Phrase(shiftType.toString(), new com.itextpdf.text.Font(com.itextpdf.text.Font.FontFamily.HELVETICA, 10, com.itextpdf.text.Font.BOLD))
+                    );
+                    shiftTypeCell.setPadding(5);
+                    switch (shiftType) {
+                        case Day: shiftTypeCell.setBackgroundColor(new com.itextpdf.text.BaseColor(255, 255, 200)); break;
+                        case Evening: shiftTypeCell.setBackgroundColor(new com.itextpdf.text.BaseColor(255, 220, 200)); break;
+                        case Night: shiftTypeCell.setBackgroundColor(new com.itextpdf.text.BaseColor(200, 200, 255)); break;
+                    }
+                    table.addCell(shiftTypeCell);
+
+                    // Shift cells for each day
+                    for (LocalDate date : weekDates) {
+                        List<Shift> dailyShifts = shiftsByDate.get(date);
+                        Optional<Shift> shiftForType = dailyShifts.stream()
+                                .filter(shift -> shift.getType() == shiftType)
+                                .findFirst();
+
+                        com.itextpdf.text.pdf.PdfPCell cell = new com.itextpdf.text.pdf.PdfPCell();
+                        cell.setPadding(5);
+
+                        if (shiftForType.isPresent()) {
+                            Shift shift = shiftForType.get();
+
+                            // Get nurse names
+                            List<String> nurseNames = shift.getAssignedNurses().stream()
+                                    .map(nurseId -> {
+                                        Optional<Nurse> nurse = nurseRepository.findById(nurseId);
+                                        return nurse.map(n -> n.getFirstName() + " " + n.getLastName()).orElse("Unknown");
+                                    })
+                                    .toList();
+
+                            // Create content with line breaks
+                            com.itextpdf.text.Phrase content = new com.itextpdf.text.Phrase();
+                            content.add(new com.itextpdf.text.Chunk(shift.getDepartment() + "\n", new com.itextpdf.text.Font(com.itextpdf.text.Font.FontFamily.HELVETICA, 8)));
+                            content.add(new com.itextpdf.text.Chunk(shift.getStartTime() + "–" + shift.getEndTime() + "\n", new com.itextpdf.text.Font(com.itextpdf.text.Font.FontFamily.HELVETICA, 7)));
+//                            content.add(new com.itextpdf.text.Chunk(shift.getAssignedNurses().size() + "/" + shift.getRequiredStaff() + "\n", new com.itextpdf.text.Font(com.itextpdf.text.Font.FontFamily.HELVETICA, 8, com.itextpdf.text.Font.BOLD)));
+
+                            // Add nurse names (max 2 per line to prevent overflow)
+                            for (int i = 0; i < nurseNames.size(); i++) {
+//                                if (i > 0 && i % 2 == 0) {
+                                    content.add(new com.itextpdf.text.Chunk("\n"));
+//                                }
+                                content.add(new com.itextpdf.text.Chunk(nurseNames.get(i) + (i < nurseNames.size() - 1 ? ", " : ""),
+                                        new com.itextpdf.text.Font(com.itextpdf.text.Font.FontFamily.HELVETICA, 8, com.itextpdf.text.Font.BOLD)));
+                            }
+
+                            cell.addElement(content);
+
+                            // Highlight understaffed shifts
+                            if (shift.getAssignedNurses().size() < shift.getRequiredStaff()) {
+                                cell.setBackgroundColor(new com.itextpdf.text.BaseColor(255, 200, 200));
+                            }
+                        } else {
+                            cell.addElement(new com.itextpdf.text.Phrase("No shift", new com.itextpdf.text.Font(com.itextpdf.text.Font.FontFamily.HELVETICA, 8)));
+                        }
+
+                        table.addCell(cell);
+                    }
+                }
+
+                document.add(table);
+
+                // Add page break if more weeks to process
+                if (weekEnd < sortedDates.size()) {
+                    document.newPage();
+                }
+            }
+        }
+
+        document.close();
+        return baos.toByteArray();
+    }
+
+    private Paragraph getScheduleHeader(Schedule schedule) {
+        com.itextpdf.text.Font headerFont = new com.itextpdf.text.Font(com.itextpdf.text.Font.FontFamily.HELVETICA, 14, com.itextpdf.text.Font.BOLD);
+        Paragraph scheduleHeader = new Paragraph(
+                "Schedule for " + getMonthName(schedule.getMonth()) + " " + schedule.getYear(),
+                headerFont
+        );
+        scheduleHeader.setAlignment(com.itextpdf.text.Element.ALIGN_CENTER);
+        scheduleHeader.setSpacingAfter(15);
+        return scheduleHeader;
+    }
+
+    private byte[] generateExcel(List<Schedule> schedules) {
+        Workbook workbook = new XSSFWorkbook();
+
+        // Use XSSFColor instead of Color
+        CellStyle headerStyle = createHeaderStyle(workbook);
+        CellStyle dayStyle = createShiftStyle(workbook, new XSSFColor(new java.awt.Color(255, 255, 200), null)); // Yellow
+        CellStyle eveningStyle = createShiftStyle(workbook, new XSSFColor(new java.awt.Color(255, 220, 200), null)); // Orange
+        CellStyle nightStyle = createShiftStyle(workbook, new XSSFColor(new java.awt.Color(200, 200, 255), null)); // Blue
+        CellStyle understaffedStyle = createUnderstaffedStyle(workbook);
+
+        for (Schedule schedule : schedules) {
+            Sheet sheet = workbook.createSheet(getMonthName(schedule.getMonth()) + " " + schedule.getYear());
+
+            // Title row
+            Row titleRow = sheet.createRow(0);
+            Cell titleCell = titleRow.createCell(0);
+            titleCell.setCellValue("Nurse Schedule - " + getMonthName(schedule.getMonth()) + " " + schedule.getYear());
+            CellStyle titleStyle = workbook.createCellStyle();
+            Font titleFont = workbook.createFont();
+            titleFont.setBold(true);
+            titleFont.setFontHeightInPoints((short) 16);
+            titleStyle.setFont(titleFont);
+            titleCell.setCellStyle(titleStyle);
+
+            // Group shifts by date
+            Map<LocalDate, List<Shift>> shiftsByDate = schedule.getShifts().stream()
+                    .collect(Collectors.groupingBy(Shift::getDate));
+
+            int rowNum = 2; // Start from row 2
+            String[] headers = {"Shift Type", "Time", "Department", "Staffing", "Assigned Nurses"};
+
+            for (LocalDate date : shiftsByDate.keySet().stream().sorted().collect(Collectors.toList())) {
+                List<Shift> dailyShifts = shiftsByDate.get(date);
+
+                // Date header
+                Row dateRow = sheet.createRow(rowNum++);
+                Cell dateCell = dateRow.createCell(0);
+                dateCell.setCellValue(date.format(DateTimeFormatter.ofPattern("EEE, MMM d, yyyy")));
+                CellStyle dateStyle = workbook.createCellStyle();
+                Font dateFont = workbook.createFont();
+                dateFont.setBold(true);
+                dateFont.setFontHeightInPoints((short) 12);
+                dateStyle.setFont(dateFont);
+                dateCell.setCellStyle(dateStyle);
+
+                // Table headers
+                Row headerRow = sheet.createRow(rowNum++);
+                for (int i = 0; i < headers.length; i++) {
+                    Cell cell = headerRow.createCell(i);
+                    cell.setCellValue(headers[i]);
+                    cell.setCellStyle(headerStyle);
+                }
+
+                // Shift rows
+                for (Shift shift : dailyShifts.stream()
+                        .sorted(Comparator.comparing(s -> s.getType().ordinal()))
+                        .collect(Collectors.toList())) {
+
+                    Row row = sheet.createRow(rowNum++);
+
+                    // Shift Type
+                    Cell typeCell = row.createCell(0);
+                    typeCell.setCellValue(shift.getType().toString());
+                    switch (shift.getType()) {
+                        case Day: typeCell.setCellStyle(dayStyle); break;
+                        case Evening: typeCell.setCellStyle(eveningStyle); break;
+                        case Night: typeCell.setCellStyle(nightStyle); break;
+                    }
+
+                    // Time
+                    row.createCell(1).setCellValue(shift.getStartTime() + " - " + shift.getEndTime());
+
+                    // Department
+                    row.createCell(2).setCellValue(shift.getDepartment());
+
+                    // Staffing
+                    Cell staffingCell = row.createCell(3);
+                    staffingCell.setCellValue(shift.getAssignedNurses().size() + "/" + shift.getRequiredStaff());
+                    if (shift.getAssignedNurses().size() < shift.getRequiredStaff()) {
+                        staffingCell.setCellStyle(understaffedStyle);
+                    }
+
+                    // Assigned Nurses (full names)
+                    List<String> nurseNames = shift.getAssignedNurses().stream()
+                            .map(nurseId -> {
+                                Optional<Nurse> nurse = nurseRepository.findById(nurseId);
+                                return nurse.map(n -> n.getFirstName() + " " + n.getLastName()).orElse("Unknown");
+                            })
+                            .collect(Collectors.toList());
+                    row.createCell(4).setCellValue(String.join(", ", nurseNames));
+                }
+
+                rowNum++; // Add empty row between dates
+            }
+
+            // Auto-size columns
+            for (int i = 0; i < headers.length; i++) {
+                sheet.autoSizeColumn(i);
+            }
+        }
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try {
+            workbook.write(baos);
+            workbook.close();
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Failed to generate Excel: " + e.getMessage());
+        }
+        return baos.toByteArray();
+    }
+
+    private CellStyle createHeaderStyle(Workbook workbook) {
+        CellStyle style = workbook.createCellStyle();
+        Font font = workbook.createFont();
+        font.setBold(true);
+        font.setColor(IndexedColors.WHITE.getIndex());
+        style.setFont(font);
+        style.setFillForegroundColor(IndexedColors.GREY_50_PERCENT.getIndex());
+        style.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+        style.setBorderBottom(BorderStyle.THIN);
+        style.setBorderTop(BorderStyle.THIN);
+        style.setBorderLeft(BorderStyle.THIN);
+        style.setBorderRight(BorderStyle.THIN);
+        return style;
+    }
+
+    private CellStyle createShiftStyle(Workbook workbook, XSSFColor color) {
+        CellStyle style = workbook.createCellStyle();
+        style.setFillForegroundColor(color);
+        style.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+        style.setBorderBottom(BorderStyle.THIN);
+        style.setBorderTop(BorderStyle.THIN);
+        style.setBorderLeft(BorderStyle.THIN);
+        style.setBorderRight(BorderStyle.THIN);
+        return style;
+    }
+
+    private CellStyle createUnderstaffedStyle(Workbook workbook) {
+        CellStyle style = workbook.createCellStyle();
+        style.setFillForegroundColor(IndexedColors.RED.getIndex());
+        style.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+        Font font = workbook.createFont();
+        font.setBold(true);
+        font.setColor(IndexedColors.WHITE.getIndex());
+        style.setFont(font);
+        return style;
+    }
+
+    private String getMonthName(int month) {
+        String[] monthNames = {"January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December"};
+        return monthNames[month - 1];
     }
 
     private static class NurseState {

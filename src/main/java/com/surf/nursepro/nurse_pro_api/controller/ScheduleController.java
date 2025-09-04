@@ -10,11 +10,14 @@ import com.surf.nursepro.nurse_pro_api.service.ScheduleService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import jakarta.validation.Valid;
 import java.util.List;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/schedules")
@@ -78,5 +81,21 @@ public class ScheduleController {
             @RequestParam int month,
             @RequestParam int year) {
         return ResponseEntity.ok(scheduleService.getWorkloadData(nurseId, month, year));
+    }
+
+    @GetMapping("/export")
+    @Operation(summary = "Export schedules for specified months and year")
+    public ResponseEntity<byte[]> exportSchedules(
+            @RequestParam List<Integer> months,
+            @RequestParam int year,
+            @RequestParam String format) {
+        ApiResponse<byte[]> response = scheduleService.exportSchedules(months, year, format);
+        String fileName = format.equalsIgnoreCase("pdf") ?
+                "schedules-" + year + "-" + months.stream().map(String::valueOf).collect(Collectors.joining("_")) + ".pdf" :
+                "schedules-" + year + "-" + months.stream().map(String::valueOf).collect(Collectors.joining("_")) + ".xlsx";
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + fileName + "\"")
+                .contentType(format.equalsIgnoreCase("pdf") ? MediaType.APPLICATION_PDF : MediaType.APPLICATION_OCTET_STREAM)
+                .body(response.getData());
     }
 }
