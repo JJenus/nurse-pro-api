@@ -2,15 +2,16 @@ app:
   cors:
     allowed-origins:
       - "https://nursepro.vercel.app"
+      - "https://*.vercel.app"
 spring:
   datasource:
-    url: ${DB_URL:jdbc:mysql://prod-db-host:3306/nurse_pro_db?useSSL=true&serverTimezone=UTC}
-    username: ${DB_USERNAME:prod_user}
-    password: ${DB_PASSWORD:prod_password}
+    url: ${DB_URL:jdbc:mysql://mysql-nursepro.alwaysdata.net/nursepro_db?useSSL=true&serverTimezone=GMT}
+    username: ${DB_USERNAME:nursepro}
+    password: ${DB_PASSWORD:@nurs3pro.com}
     driver-class-name: com.mysql.cj.jdbc.Driver
   jpa:
     hibernate:
-      ddl-auto: validate
+      ddl-auto: update
     show-sql: false
     properties:
       hibernate:
@@ -19,14 +20,36 @@ spring:
     jwt:
       secret: ${JWT_SECRET:your-prod-jwt-secret-key}
       expiration: 86400000
+      refresh:
+        expiration: 604800000 # 7 days in milliseconds
+jwt:
+  secret: ${JWT_SECRET:your-prod-jwt-secret-key}
+  expiration: 86400000
+  refresh:
+    expiration: 604800000 # 7 days in milliseconds
 server:
   port: 8080
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus
 springdoc:
+  packages-to-scan: com.surf.nursepro.nurse_pro_api.controller
+  default-consumes-media-type: application/json
+  default-produces-media-type: application/json
   api-docs:
     path: /api-docs
+    enabled: true
   swagger-ui:
     path: /swagger-ui.html
+    enabled: true
+    operationsSorter: alpha
+    tagsSorter: alpha
+    display-request-duration: true
 logging:
   level:
+    root: INFO
     com.surf.nursepro: INFO
     org.springframework: WARN
+    org.springdoc: INFO

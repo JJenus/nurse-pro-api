@@ -3,7 +3,7 @@ spring:
   application:
     name:nurse-pro-api:
   profiles:
-    active: dev
+    active: prod
 jwt:
   secret: your-secure-jwt-secret-key-here-32-chars-minimum
   expiration: 86400000 # 24 hours in milliseconds
