@@ -5,9 +5,9 @@ app:
       - "https://*.vercel.app"
 spring:
   datasource:
-    url: ${DB_URL:jdbc:mysql://mysql-nursepro.alwaysdata.net/nursepro_db?useSSL=true&serverTimezone=GMT}
-    username: ${DB_USERNAME:nursepro}
-    password: ${DB_PASSWORD:@nurs3pro.com}
+    url: jdbc:mysql://mysql-nurseschedulerpro.alwaysdata.net/nurseschedulerpro_db
+    username: 429125
+    password: "@nurs3pro.com"
     driver-class-name: com.mysql.cj.jdbc.Driver
   jpa:
     hibernate:
@@ -18,12 +18,12 @@ spring:
         dialect: org.hibernate.dialect.MySQL8Dialect
   security:
     jwt:
-      secret: ${JWT_SECRET:your-prod-jwt-secret-key}
+      secret: your-prod-jwt-secret-key
       expiration: 86400000
       refresh:
         expiration: 604800000 # 7 days in milliseconds
 jwt:
-  secret: ${JWT_SECRET:your-prod-jwt-secret-key}
+  secret: your-prod-jwt-secret-key
   expiration: 86400000
   refresh:
     expiration: 604800000 # 7 days in milliseconds

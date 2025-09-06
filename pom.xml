@@ -6,7 +6,7 @@
 
     <groupId>com.surf.nursepro</groupId>
     <artifactId>nurse-pro-api</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>0.0.1</version>
     <name>nurse-pro-api</name>
     <description>Nurse Scheduling API</description>
 
@@ -85,6 +85,7 @@
     </dependencies>
 
     <build>
+    <finalName>nursepro</finalName>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
@@ -101,4 +102,4 @@
         </plugins>
     </build>
 
-    </project>
+</project>
