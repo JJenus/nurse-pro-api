@@ -15,7 +15,7 @@ spring:
     show-sql: false
     properties:
       hibernate:
-        dialect: org.hibernate.dialect.MySQL8Dialect
+        dialect: org.hibernate.dialect.MySQLDialect
   security:
     jwt:
       secret: your-prod-jwt-secret-key

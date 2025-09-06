@@ -1,0 +1,36 @@
+version: '3.8'
+services:
+  app:
+    image: nursepro-api:1.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - SPRING_DATASOURCE_URL=jdbc:mysql://db:3306/nursepro_db?createDatabaseIfNotExist=true
+      - SPRING_DATASOURCE_USERNAME=root
+      - SPRING_DATASOURCE_PASSWORD=
+    depends_on:
+      - db
+    networks:
+      - nursepro-network
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: nursepro_db
+      MYSQL_USER: user
+      MYSQL_PASSWORD: password
+      MYSQL_ROOT_PASSWORD: rootpassword
+    volumes:
+      - db-data:/var/lib/mysql
+    ports:
+      - "3306:3306" # Optional: for local MySQL client access
+    networks:
+      - nursepro-network
+networks:
+  nursepro-network:
+    driver: bridge
+volumes:
+  db-data:
