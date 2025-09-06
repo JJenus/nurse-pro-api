@@ -30,7 +30,7 @@ import org.springframework.context.annotation.Configuration;
         servers = {
                 @Server(url = "http://localhost:8080", description = "Local Development Server"),
                 @Server(url = "https://api.nursepro.com", description = "Production Server"),
-                @Server(url = "https://nurseschedulerpro.alwaysdata.net/", description = "Staging Server"),
+                @Server(url = "https://nurse-pro-api.onrender.com", description = "Staging Server"),
         },
         security = {
                 @SecurityRequirement(name = "bearerAuth")

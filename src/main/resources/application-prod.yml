@@ -3,6 +3,7 @@ app:
     allowed-origins:
       - "https://nursepro.vercel.app"
       - "https://*.vercel.app"
+      - "https://*.onrender.com"
 spring:
   datasource:
     url: jdbc:mysql://mysql-nurseschedulerpro.alwaysdata.net/nurseschedulerpro_db
