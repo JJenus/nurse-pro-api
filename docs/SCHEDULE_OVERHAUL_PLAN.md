@@ -67,6 +67,17 @@ Deterministic, seedable, constraint-based.
 
 ## Phase 5: API surface
 
+Status: backend and frontend done on `feature/schedule-overhaul` (backend not compiled or run; frontend type-checks with no new errors and `vite build` passes).
+
+- [x] Endpoints added: `GET /schedules?month&year&status` (filtered; one schedule per month so no paging), `GET /schedules/{id}`, `GET /schedules/{id}/conflicts`, `POST /schedules/{id}/validate`, `PUT /schedules/{id}/status`, `GET /schedules/swap-requests`, `POST /schedules/shifts/validate`.
+- [x] `ScheduleValidator` is the single rules engine (understaffed, nurse unavailable incl. night shifts spilling into the next day, double-booked same day, nurse no longer exists). Min-rest and consecutive-day rules join it in Phase 2.
+- [x] Generation params unified (`minNursesPerShift`, `maxNursesPerShift`, `maxConsecutiveShifts`, `maxConsecutiveDay`, `maxConsecutiveNight`, `minRestHours`, `maxOvertimeHours`, `seed`, `rules`) with validation and defaults; min/max nurses and consecutive limits now drive the existing generator. Generate returns `{schedule, conflicts, stats}`.
+- [x] Conflicts and workload are refreshed whenever shifts change. Archived schedules reject edits (409). Status changes are idempotent (Draft, Published, Archived).
+- [x] `reviewedBy` comes from the authenticated principal (falls back to `system`).
+- [x] V3 migration converts enum columns to VARCHAR so new enum values (`overlap`, later `Cancelled`) can be stored.
+- [ ] Role checks on approve/reject: **blocked**, see "Findings added during implementation".
+
+
 | Endpoint | Purpose |
 |---|---|
 | `GET /schedules?month&year&status` | Filtered, paginated list |
@@ -81,6 +92,20 @@ Deterministic, seedable, constraint-based.
 Unified generation params: `minNursesPerShift`, `maxNursesPerShift`, `maxConsecutiveDay`, `maxConsecutiveNight`, `minRestHours`, `seed`, `rules` (defaults and `@Min`/`@Max` on the backend). Generate returns `{schedule, conflicts, stats}`. `reviewedBy` comes from the authenticated principal, with role checks on approve/reject.
 
 ## Phase 6: Frontend reconciliation
+
+Status: first pass done together with Phase 5; the UI items still open are marked below.
+
+- [x] Types: `Shift.date`/`Schedule.generatedAt` are ISO strings, `scheduleId`/`version` added, `ShiftInput`, `ScheduleGenerationResult`, `ScheduleFilters`, conflict fields and the `overlap` type.
+- [x] Store: real endpoints, `fetchSwapRequests` (called from the swap list and dashboard), `fetchConflicts`, `updateScheduleStatus`, `previewShift`; no success toast on reads; shift edits send the full shift plus `version` (409 on stale); conflicts re-fetched after every shift change.
+- [x] Dates are sent as local `yyyy-MM-dd` (`utils/dates.ts`).
+- [x] Generator shows the server's message on 409 (schedule already exists).
+- [x] Schedule editor uses server conflicts instead of its local mock.
+- [x] Export fallback filename uses `.xlsx` for Excel.
+- [ ] Generator preview step and "open existing / regenerate draft" on 409.
+- [ ] Shift form: show `previewShift` results before saving.
+- [ ] Publish / archive buttons (store action exists).
+- [ ] Reschedule dialog and swap approval screen (Phases 3 and 4).
+
 
 - Types: dates as ISO strings, `scheduleId`, real conflict shape, unified constraints.
 - Store: fix endpoints, add `fetchSwapRequests`, re-fetch after mutations, drop success toast on fetch, per-action loading, distinct 409 handling.
@@ -103,6 +128,15 @@ Unified generation params: `minNursesPerShift`, `maxNursesPerShift`, `maxConsecu
 - Property tests: hundreds of seeds across several months never violate a hard constraint; same seed gives same output.
 - Testcontainers integration tests: concurrent double-generate yields exactly one schedule; swap approve/reject races resolve correctly.
 - CI contract check that fails when generated TypeScript types are stale.
+
+## Findings added during implementation
+
+- **Security:** `SecurityConfig` ends with `.anyRequest().permitAll()`, so every endpoint (including approve/reject and delete) is open to unauthenticated callers even though a JWT filter exists. Role checks and `authenticated()` were not switched on because that changes behaviour for every client; decide this deliberately.
+- **Timezone bug (fixed):** the shift form sent a JS `Date`, which serialises to UTC, so for UTC+1 users a shift created for a day landed on the previous day.
+- **Partial updates (fixed):** the editor sent `{assignedNurses}` only; the API now validates a full shift, so the store merges the change into the stored shift first.
+- **Retry logic (fixed):** the client's retry guard compared `undefined < 3` (never true), so nothing retried. It now retries only GET/HEAD/OPTIONS.
+- **Drag and drop is not atomic:** moving a nurse between shifts issues two separate updates; a failure in between leaves the nurse unassigned. Needs a single move/swap endpoint (Phase 4).
+- **Nurse dates:** `Nurse.unavailableDates` is also a `Date[]` sent as UTC timestamps; same class of bug, to fix in Phase 7.
 
 ## Order of work
 

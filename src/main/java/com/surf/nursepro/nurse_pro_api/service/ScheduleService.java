@@ -477,6 +477,8 @@ public class ScheduleService {
         shift.setSchedule(schedule);
         applyRequest(shift, request);
         Shift savedShift = shiftRepository.save(shift);
+        ensureInSchedule(schedule, savedShift);
+        refreshDerivedData(schedule);
         logger.info("Created shift ID: {}", savedShift.getId());
         return new ApiResponse<>(savedShift, "Shift created successfully", true);
     }
@@ -506,6 +508,8 @@ public class ScheduleService {
         shift.setSchedule(schedule);
         applyRequest(shift, request);
         Shift savedShift = shiftRepository.save(shift);
+        ensureInSchedule(schedule, savedShift);
+        refreshDerivedData(schedule);
         logger.info("Updated shift ID: {}", savedShift.getId());
         return new ApiResponse<>(savedShift, "Shift updated successfully", true);
     }
@@ -522,13 +526,32 @@ public class ScheduleService {
             return new ApiResponse<>(null, "Shift already deleted", true);
         }
         Shift existing = shiftRepository.findById(shiftId).orElse(null);
-        if (existing != null) {
-            assertEditable(existing.getSchedule());
-        }
+        Schedule schedule = existing != null ? existing.getSchedule() : null;
+        assertEditable(schedule);
         conflictRepository.deleteByShiftId(shiftId);
+        if (schedule != null) {
+            schedule.getShifts().removeIf(sh -> shiftId.equals(sh.getId()));
+        }
         shiftRepository.deleteById(shiftId);
+        if (schedule != null) {
+            refreshDerivedData(schedule);
+        }
         logger.info("Deleted shift ID: {}", shiftId);
         return new ApiResponse<>(null, "Shift deleted successfully", true);
+    }
+
+    /** Conflicts and workload are derived from the shifts, so they are refreshed whenever the shifts change. */
+    private void refreshDerivedData(Schedule schedule) {
+        updateWorkloadData(schedule);
+        detectConflicts(schedule);
+    }
+
+    /** Schedule.shifts is the inverse side of the relationship; keep the in-memory collection in step with the shift. */
+    private void ensureInSchedule(Schedule schedule, Shift shift) {
+        boolean present = schedule.getShifts().stream().anyMatch(sh -> shift.getId().equals(sh.getId()));
+        if (!present) {
+            schedule.getShifts().add(shift);
+        }
     }
 
     private Schedule resolveSchedule(ShiftRequest request) {
