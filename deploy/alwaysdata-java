@@ -1,0 +1,26 @@
+#!/bin/sh
+# AlwaysData injects JAVA_TOOL_OPTIONS with a 192m heap plus 192m metaspace,
+# which exceeds the account memory limit and gets OOM-killed during startup.
+# Keep this wrapper first on PATH (~/.local/bin) so the site's `java` resolves here.
+unset JAVA_TOOL_OPTIONS
+
+# Runtime secrets live outside the repo (created by CI, mode 600).
+if [ -r "$HOME/.config/nursepro/env" ]; then
+  set -a
+  . "$HOME/.config/nursepro/env"
+  set +a
+fi
+
+JAVA_BIN=/usr/alwaysdata/java/21/bin/java
+[ -x "$JAVA_BIN" ] || JAVA_BIN=/usr/bin/java
+
+exec "$JAVA_BIN" \
+  -Xms32m \
+  -Xmx128m \
+  -XX:MaxMetaspaceSize=128m \
+  -XX:ReservedCodeCacheSize=32m \
+  -XX:TieredStopAtLevel=1 \
+  -Xss512k \
+  -XX:+UseSerialGC \
+  -Dspring.main.lazy-initialization=true \
+  "$@"

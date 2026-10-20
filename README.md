@@ -1,13 +1,8 @@
 # Nurse Schedule Pro API
 
-![Nurse Pro](https://img.shields.io/badge/Nurse-Pro%20API-blueviolet)
-![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.x-brightgreen)
-![Java](https://img.shields.io/badge/Java-17-orange)
-![License](https://img.shields.io/badge/License-Apache%202.0-blue)
-
 Nurse Pro is a professional shift management API designed to schedule nursing shifts with fairness and prevent burnout through intelligent scheduling algorithms.
 
-## 🚀 Features
+## Features
 
 - **Smart Shift Scheduling**: AI-powered scheduling with fairness constraints
 - **Shift Management**: Create, update, and manage nursing shifts
@@ -18,17 +13,16 @@ Nurse Pro is a professional shift management API designed to schedule nursing sh
 - **JWT Security**: Secure authentication and authorization
 - **OpenAPI Documentation**: Interactive API documentation
 
-## 📋 API Documentation
+## API Documentation
 
 ### Base URLs
 - **Development**: `http://localhost:8080`
-- **Staging**: `https://staging.nursepro.com`
-- **Production**: `https://api.nursepro.com`
+- **Production**: `https://nursepro.alwaysdata.net`
 
 ### Interactive Documentation
 The API includes comprehensive OpenAPI/Swagger documentation available at:
 - `/swagger-ui.html` - Interactive API playground
-- `/v3/api-docs` - OpenAPI specification
+- `/api-docs` - OpenAPI specification
 
 ### Authentication
 All endpoints require JWT authentication:
@@ -36,7 +30,7 @@ All endpoints require JWT authentication:
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6...
 ```
 
-## 🏗️ API Structure
+## API Structure
 
 ### Core Entities
 - **Nurses**: Healthcare professionals with qualifications and preferences
@@ -80,7 +74,7 @@ PUT    /api/schedules/swap-requests/{id}/approve  # Approve swap
 PUT    /api/schedules/swap-requests/{id}/reject   # Reject swap
 ```
 
-## 🎯 Scheduling Algorithm
+## Scheduling Algorithm
 
 ### Key Features
 - **Fair Distribution**: Ensures equal shift distribution among nurses
@@ -96,7 +90,7 @@ PUT    /api/schedules/swap-requests/{id}/reject   # Reject swap
 - Maximum 3 nurses per shift
 - Target 14 shifts per nurse per month
 
-## 📊 Export Features
+## Export Features
 
 ### PDF Export
 Generates professional PDF reports with:
@@ -113,12 +107,12 @@ Creates Excel spreadsheets with:
 - Filterable and sortable data
 - Professional formatting
 
-## 🛠️ Installation & Setup
+## Installation & Setup
 
 ### Prerequisites
 - Java 17 or higher
 - Maven 3.6+
-- MySQL 8.0+
+- PostgreSQL 17+ (or Docker Compose)
 
 ### Quick Start
 1. **Clone the repository**
@@ -129,48 +123,44 @@ Creates Excel spreadsheets with:
 
 2. **Configure database**
    ```bash
-   # Create MySQL database
-   CREATE DATABASE nurse_pro_db;
+   # Create the local PostgreSQL database
+   psql -U postgres -c 'CREATE DATABASE nurse_db;'
    ```
 
-3. **Update application properties**
-   ```properties
-   # src/main/resources/application.properties
-   spring.datasource.url=jdbc:mysql://localhost:3306/nurse_pro_db
-   spring.datasource.username=your_username
-   spring.datasource.password=your_password
-   ```
+   The `dev` profile defaults to `jdbc:postgresql://localhost:5432/nurse_db` with
+   `postgres` / `postgres`. Override it with `DB_URL`, `DB_USERNAME`, and
+   `DB_PASSWORD`. `docker compose up -d db` starts PostgreSQL 17 instead.
 
-4. **Build and run**
+3. **Build and run**
    ```bash
-   mvn clean install
-   mvn spring-boot:run
+   ./mvnw clean package -DskipTests
+   ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
    ```
 
-5. **Access the API**
+4. **Access the API**
     - API: http://localhost:8080/api
     - Docs: http://localhost:8080/swagger-ui.html
 
-## 🔧 Configuration
+## Configuration
 
 ### Environment Variables
 ```bash
-export DATABASE_URL=your_database_url
-export DATABASE_USERNAME=your_username
-export DATABASE_PASSWORD=your_password
+export DB_URL=jdbc:postgresql://localhost:5432/nurse_db
+export DB_USERNAME=postgres
+export DB_PASSWORD=postgres
 export JWT_SECRET=your_jwt_secret
-export API_PORT=8080
+export PORT=8080
 ```
 
 ### Application Properties
 ```properties
 # Server
-server.port=8080
+server.port=${PORT:8080}
 
 # Database
-spring.datasource.url=jdbc:mysql://localhost:3306/nurse_pro_db
-spring.datasource.username=root
-spring.datasource.password=password
+spring.datasource.url=${DB_URL:jdbc:postgresql://localhost:5432/nurse_db}
+spring.datasource.username=${DB_USERNAME:postgres}
+spring.datasource.password=${DB_PASSWORD:postgres}
 
 # JPA
 spring.jpa.hibernate.ddl-auto=update
@@ -181,7 +171,26 @@ jwt.secret=your-secret-key
 jwt.expiration=86400000
 ```
 
-## 🧪 Testing (Not available)
+## Deployment
+
+Pushes to `main` run `.github/workflows/deploy-api.yml`: it builds
+`target/nursepro.jar`, uploads it to `~/nurpro.jar` on AlwaysData, and refreshes
+the JVM wrapper and runtime secrets. If `ALWAYSDATA_API_TOKEN` is configured it
+also restarts the site; otherwise restart it manually from **Web > Sites** in
+AlwaysData.
+
+Repository secrets:
+
+- `ALWAYSDATA_SSH_KEY` - required; private deploy key authorized on the account
+- `DB_PASSWORD` - required; PostgreSQL password written to `~/.config/nursepro/env`
+- `ALWAYSDATA_API_TOKEN` - optional; enables automatic restart
+
+The AlwaysData user program runs `java -jar nurpro.jar --server.address=:: --server.port=$PORT`.
+`~/.local/bin/java` must remain in place: it replaces the platform's
+`JAVA_TOOL_OPTIONS` with a memory profile that avoids OOM-killing the JVM during
+startup.
+
+## Testing (Not available)
 
 ### Run Tests
 ```bash
@@ -205,13 +214,13 @@ curl -X GET "http://localhost:8080/api/schedules" \
 http GET :8080/api/schedules "Authorization:Bearer your-jwt-token"
 ```
 
-## 📦 Dependencies
+## Dependencies
 
 ### Core Dependencies
 - **Spring Boot 3.x** - Application framework
 - **Spring Security** - Authentication and authorization
 - **Spring Data JPA** - Database operations
-- **MySQL Connector** - Database driver
+- **PostgreSQL JDBC Driver** - Database driver
 - **JWT** - JSON Web Token support
 - **Lombok** - Reduced boilerplate code
 
@@ -223,7 +232,7 @@ http GET :8080/api/schedules "Authorization:Bearer your-jwt-token"
 - **Springdoc OpenAPI** - API documentation
 - **Swagger UI** - Interactive API explorer
 
-## 🤝 Contributing
+## Contributing
 
 We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
 
@@ -233,18 +242,18 @@ We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-## 📄 License
+## License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
-## 🆘 Support
+## Support
 
 - **Email**: support@nursepro.com
 - **Website**: https://nursepro.com
 - **Documentation**: https://docs.nursepro.com
 - **Issues**: GitHub Issues
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - Nursing professionals worldwide
 - Healthcare organizations using our system

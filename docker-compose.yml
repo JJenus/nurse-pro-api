@@ -9,24 +9,23 @@ services:
       - "8080:8080"
     environment:
       - SPRING_PROFILES_ACTIVE=dev
-      - SPRING_DATASOURCE_URL=jdbc:mysql://db:3306/nursepro_db?createDatabaseIfNotExist=true
-      - SPRING_DATASOURCE_USERNAME=root
-      - SPRING_DATASOURCE_PASSWORD=
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://db:5432/nursepro_db
+      - SPRING_DATASOURCE_USERNAME=nursepro
+      - SPRING_DATASOURCE_PASSWORD=nursepro
     depends_on:
       - db
     networks:
       - nursepro-network
   db:
-    image: mysql:8.0
+    image: postgres:17
     environment:
-      MYSQL_DATABASE: nursepro_db
-      MYSQL_USER: user
-      MYSQL_PASSWORD: password
-      MYSQL_ROOT_PASSWORD: rootpassword
+      POSTGRES_DB: nursepro_db
+      POSTGRES_USER: nursepro
+      POSTGRES_PASSWORD: nursepro
     volumes:
-      - db-data:/var/lib/mysql
+      - db-data:/var/lib/postgresql/data
     ports:
-      - "3306:3306" # Optional: for local MySQL client access
+      - "5432:5432" # Optional: for local PostgreSQL client access
     networks:
       - nursepro-network
 networks:
