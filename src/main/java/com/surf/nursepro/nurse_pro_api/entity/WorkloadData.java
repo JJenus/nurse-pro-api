@@ -6,7 +6,8 @@ import java.time.LocalDateTime;
 
 @Data
 @Entity
-@Table(name = "workload_data")
+@Table(name = "workload_data",
+        uniqueConstraints = @UniqueConstraint(name = "uk_workload_nurse_period", columnNames = {"nurse_id", "month", "year"}))
 public class WorkloadData {
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)

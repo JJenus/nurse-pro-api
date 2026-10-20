@@ -3,6 +3,7 @@ package com.surf.nursepro.nurse_pro_api.controller;
 import com.surf.nursepro.nurse_pro_api.dto.ApiResponse;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationParams;
 import com.surf.nursepro.nurse_pro_api.entity.Schedule;
+import com.surf.nursepro.nurse_pro_api.dto.ShiftRequest;
 import com.surf.nursepro.nurse_pro_api.entity.Shift;
 import com.surf.nursepro.nurse_pro_api.entity.SwapRequest;
 import com.surf.nursepro.nurse_pro_api.entity.WorkloadData;
@@ -40,13 +41,13 @@ public class ScheduleController {
 
     @PostMapping("/shifts")
     @Operation(summary = "Create new shift")
-    public ResponseEntity<ApiResponse<Shift>> createShift(@Valid @RequestBody Shift shift) {
+    public ResponseEntity<ApiResponse<Shift>> createShift(@Valid @RequestBody ShiftRequest shift) {
         return ResponseEntity.ok(scheduleService.createShift(shift));
     }
 
     @PutMapping("/shifts/{shiftId}")
     @Operation(summary = "Update shift")
-    public ResponseEntity<ApiResponse<Shift>> updateShift(@PathVariable String shiftId, @Valid @RequestBody Shift shift) {
+    public ResponseEntity<ApiResponse<Shift>> updateShift(@PathVariable String shiftId, @Valid @RequestBody ShiftRequest shift) {
         return ResponseEntity.ok(scheduleService.updateShift(shiftId, shift));
     }
 

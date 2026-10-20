@@ -3,6 +3,9 @@ package com.surf.nursepro.nurse_pro_api.service;
 import com.itextpdf.text.Paragraph;
 import com.surf.nursepro.nurse_pro_api.dto.ApiResponse;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationParams;
+import com.surf.nursepro.nurse_pro_api.dto.ShiftRequest;
+import com.surf.nursepro.nurse_pro_api.exception.ConflictException;
+import com.surf.nursepro.nurse_pro_api.util.ShiftTimes;
 import com.surf.nursepro.nurse_pro_api.entity.*;
 import com.surf.nursepro.nurse_pro_api.enums.*;
 import com.surf.nursepro.nurse_pro_api.repository.*;
@@ -58,7 +61,7 @@ public class ScheduleService {
 
         if (scheduleRepository.existsByMonthAndYear(params.getMonth(), params.getYear())) {
             logger.warn("Schedule already exists for month {} and year {}", params.getMonth(), params.getYear());
-            throw new IllegalArgumentException("Schedule already exists for month " + params.getMonth() + " and year " + params.getYear());
+            throw new ConflictException("Schedule already exists for month " + params.getMonth() + " and year " + params.getYear());
         }
 
         List<Nurse> nurses = nurseRepository.findAll();
@@ -101,7 +104,7 @@ public class ScheduleService {
 
                 if (eligibleNurses.isEmpty()) {
                     logger.warn("No eligible nurses for shift: {} on {}", shiftType, currentDate);
-                    shift.setAssignedNurses(new ArrayList<>());
+                    shift.setAssignedNurses(new LinkedHashSet<>());
                     shifts.add(shift);
                     continue;
                 }
@@ -112,7 +115,7 @@ public class ScheduleService {
                         .map(Nurse::getId)
                         .collect(Collectors.toList());
 
-                shift.setAssignedNurses(assignedNurseIds);
+                shift.setAssignedNurses(new LinkedHashSet<>(assignedNurseIds));
                 shifts.add(shift);
 
                 updateNurseStates(states, assignedNurseIds, shiftType, day, currentDate);
@@ -122,6 +125,7 @@ public class ScheduleService {
             updateRestStates(states, assignedToday, day);
         }
 
+        shifts.forEach(s -> s.setSchedule(schedule));
         schedule.setShifts(shifts);
         Schedule savedSchedule = scheduleRepository.save(schedule);
         updateWorkloadData(savedSchedule);
@@ -255,39 +259,65 @@ public class ScheduleService {
     }
 
     private void updateWorkloadData(Schedule schedule) {
-        Map<String, WorkloadData> workloadMap = new HashMap<>();
+        Map<String, WorkloadData> computed = new LinkedHashMap<>();
 
         for (Shift shift : schedule.getShifts()) {
             boolean isWeekend = shift.getDate().getDayOfWeek().getValue() >= 6;
             boolean isNight = shift.getType() == ShiftType.Night;
+            double hours = ShiftTimes.hours(shift);
 
             for (String nurseId : shift.getAssignedNurses()) {
-                WorkloadData data = workloadMap.computeIfAbsent(nurseId, id -> {
+                WorkloadData data = computed.computeIfAbsent(nurseId, id -> {
                     WorkloadData wd = new WorkloadData();
                     wd.setNurseId(id);
                     wd.setMonth(schedule.getMonth());
                     wd.setYear(schedule.getYear());
-                    wd.setCreatedAt(LocalDateTime.now());
                     return wd;
                 });
 
                 data.setShiftsCount(data.getShiftsCount() + 1);
-                data.setTotalHours(data.getTotalHours() + 8); // Assuming 8-hour shifts
+                data.setTotalHours(data.getTotalHours() + hours);
                 if (isNight) {
                     data.setNightShifts(data.getNightShifts() + 1);
                 }
                 if (isWeekend) {
                     data.setWeekendShifts(data.getWeekendShifts() + 1);
                 }
-                data.setUpdatedAt(LocalDateTime.now());
             }
         }
 
-        workloadDataRepository.saveAll(workloadMap.values());
-        logger.debug("Updated workload data for {} nurses", workloadMap.size());
+        // Upsert by (nurse, month, year): the table has a unique key on it, and re-running must never duplicate.
+        Map<String, WorkloadData> existing = new HashMap<>();
+        for (WorkloadData row : workloadDataRepository.findByMonthAndYear(schedule.getMonth(), schedule.getYear())) {
+            existing.putIfAbsent(row.getNurseId(), row);
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        List<WorkloadData> toSave = new ArrayList<>();
+        for (WorkloadData fresh : computed.values()) {
+            WorkloadData row = existing.remove(fresh.getNurseId());
+            if (row == null) {
+                row = fresh;
+                row.setCreatedAt(now);
+            } else {
+                row.setShiftsCount(fresh.getShiftsCount());
+                row.setTotalHours(fresh.getTotalHours());
+                row.setNightShifts(fresh.getNightShifts());
+                row.setWeekendShifts(fresh.getWeekendShifts());
+            }
+            row.setUpdatedAt(now);
+            toSave.add(row);
+        }
+
+        // Nurses that no longer have any shift this month
+        workloadDataRepository.deleteAll(existing.values());
+        workloadDataRepository.saveAll(toSave);
+        logger.debug("Updated workload data for {} nurses", toSave.size());
     }
 
     private void detectConflicts(Schedule schedule) {
+        // Conflicts are derived data: drop the previous set for this schedule, then insert the current one.
+        conflictRepository.deleteByScheduleId(schedule.getId());
         List<ScheduleConflict> conflicts = new ArrayList<>();
 
         for (Shift shift : schedule.getShifts()) {
@@ -296,7 +326,10 @@ public class ScheduleService {
                 conflict.setType(ScheduleConflictType.understaffed);
                 conflict.setSeverity(shift.getAssignedNurses().isEmpty() ?
                         ScheduleConflictSeverity.critical : ScheduleConflictSeverity.high);
+                conflict.setScheduleId(schedule.getId());
                 conflict.setShiftId(shift.getId());
+                conflict.setDate(shift.getDate());
+                conflict.setResolved(false);
                 conflict.setMessage(String.format("%s %s shift needs %d more nurse(s)",
                         shift.getDepartment(), shift.getType(),
                         shift.getRequiredStaff() - shift.getAssignedNurses().size()));
@@ -314,20 +347,27 @@ public class ScheduleService {
     }
 
     @Transactional
-    public ApiResponse<Shift> createShift(Shift shift) {
-        if (shift == null || shift.getDate() == null || shift.getType() == null) {
-            logger.warn("Invalid shift data: {}", shift);
+    public ApiResponse<Shift> createShift(ShiftRequest request) {
+        if (request == null) {
             throw new IllegalArgumentException("Invalid shift data");
         }
+        Schedule schedule = resolveSchedule(request);
+        assertWithinSchedule(schedule, request.getDate());
+        assertNursesExist(request.getAssignedNurses());
+        assertSlotFree(schedule, request, null);
+
+        Shift shift = new Shift();
+        shift.setSchedule(schedule);
+        applyRequest(shift, request);
         Shift savedShift = shiftRepository.save(shift);
         logger.info("Created shift ID: {}", savedShift.getId());
         return new ApiResponse<>(savedShift, "Shift created successfully", true);
     }
 
     @Transactional
-    public ApiResponse<Shift> updateShift(String shiftId, Shift updatedShift) {
-        if (shiftId == null || updatedShift == null) {
-            logger.warn("Invalid shift ID or data: shiftId={}, updatedShift={}", shiftId, updatedShift);
+    public ApiResponse<Shift> updateShift(String shiftId, ShiftRequest request) {
+        if (shiftId == null || request == null) {
+            logger.warn("Invalid shift ID or data: shiftId={}", shiftId);
             throw new IllegalArgumentException("Invalid shift ID or data");
         }
         Shift shift = shiftRepository.findById(shiftId)
@@ -335,14 +375,18 @@ public class ScheduleService {
                     logger.error("Shift not found: {}", shiftId);
                     return new IllegalArgumentException("Shift not found");
                 });
-        shift.setDate(updatedShift.getDate());
-        shift.setStartTime(updatedShift.getStartTime());
-        shift.setEndTime(updatedShift.getEndTime());
-        shift.setType(updatedShift.getType());
-        shift.setDepartment(updatedShift.getDepartment());
-        shift.setRequiredStaff(updatedShift.getRequiredStaff());
-        shift.setAssignedNurses(updatedShift.getAssignedNurses());
-        shift.setRequirements(updatedShift.getRequirements());
+        if (request.getVersion() != null && !request.getVersion().equals(shift.getVersion())) {
+            throw new ConflictException("Shift was modified by someone else. Reload it and try again.");
+        }
+
+        // Shifts created before schedule_id existed may still be unattached; attach them on first edit.
+        Schedule schedule = shift.getSchedule() != null ? shift.getSchedule() : resolveSchedule(request);
+        assertWithinSchedule(schedule, request.getDate());
+        assertNursesExist(request.getAssignedNurses());
+        assertSlotFree(schedule, request, shiftId);
+
+        shift.setSchedule(schedule);
+        applyRequest(shift, request);
         Shift savedShift = shiftRepository.save(shift);
         logger.info("Updated shift ID: {}", savedShift.getId());
         return new ApiResponse<>(savedShift, "Shift updated successfully", true);
@@ -354,13 +398,71 @@ public class ScheduleService {
             logger.warn("Invalid shift ID: {}", shiftId);
             throw new IllegalArgumentException("Invalid shift ID");
         }
+        // Idempotent: deleting a shift that is already gone is a success, so retries are safe.
         if (!shiftRepository.existsById(shiftId)) {
-            logger.error("Shift not found: {}", shiftId);
-            throw new IllegalArgumentException("Shift not found");
+            logger.info("Shift {} already deleted", shiftId);
+            return new ApiResponse<>(null, "Shift already deleted", true);
         }
+        conflictRepository.deleteByShiftId(shiftId);
         shiftRepository.deleteById(shiftId);
         logger.info("Deleted shift ID: {}", shiftId);
         return new ApiResponse<>(null, "Shift deleted successfully", true);
+    }
+
+    private Schedule resolveSchedule(ShiftRequest request) {
+        if (request.getScheduleId() != null && !request.getScheduleId().isBlank()) {
+            return scheduleRepository.findById(request.getScheduleId())
+                    .orElseThrow(() -> new IllegalArgumentException("Schedule not found"));
+        }
+        int month = request.getDate().getMonthValue();
+        int year = request.getDate().getYear();
+        return scheduleRepository.findByMonthAndYear(month, year)
+                .orElseThrow(() -> new IllegalArgumentException("No schedule exists for " + month + "/" + year));
+    }
+
+    private void assertWithinSchedule(Schedule schedule, LocalDate date) {
+        if (date.getMonthValue() != schedule.getMonth() || date.getYear() != schedule.getYear()) {
+            throw new IllegalArgumentException("Shift date " + date + " is outside schedule "
+                    + schedule.getMonth() + "/" + schedule.getYear());
+        }
+    }
+
+    private void assertNursesExist(Collection<String> nurseIds) {
+        if (nurseIds == null || nurseIds.isEmpty()) {
+            return;
+        }
+        Set<String> distinct = new HashSet<>(nurseIds);
+        if (nurseRepository.findAllById(distinct).size() != distinct.size()) {
+            throw new IllegalArgumentException("One or more assigned nurses do not exist");
+        }
+    }
+
+    /** At most one shift per (schedule, date, type, department). The database enforces it too; this gives a clean 409. */
+    private void assertSlotFree(Schedule schedule, ShiftRequest request, String excludingShiftId) {
+        Optional<Shift> clash = shiftRepository.findBySchedule_IdAndDateAndTypeAndDepartment(
+                schedule.getId(), request.getDate(), request.getType(), request.getDepartment());
+        if (clash.isPresent() && !clash.get().getId().equals(excludingShiftId)) {
+            throw new ConflictException("A " + request.getType() + " shift for " + request.getDepartment()
+                    + " already exists on " + request.getDate());
+        }
+    }
+
+    private void applyRequest(Shift shift, ShiftRequest request) {
+        shift.setDate(request.getDate());
+        shift.setStartTime(request.getStartTime());
+        shift.setEndTime(request.getEndTime());
+        shift.setType(request.getType());
+        shift.setDepartment(request.getDepartment());
+        shift.setRequiredStaff(request.getRequiredStaff());
+
+        shift.getAssignedNurses().clear();
+        if (request.getAssignedNurses() != null) {
+            shift.getAssignedNurses().addAll(request.getAssignedNurses());
+        }
+        shift.getRequirements().clear();
+        if (request.getRequirements() != null) {
+            shift.getRequirements().addAll(request.getRequirements());
+        }
     }
 
     @Transactional

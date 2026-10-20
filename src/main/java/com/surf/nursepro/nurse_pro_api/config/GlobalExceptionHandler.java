@@ -1,11 +1,14 @@
 package com.surf.nursepro.nurse_pro_api.config;
 
 import com.surf.nursepro.nurse_pro_api.dto.ApiError;
+import com.surf.nursepro.nurse_pro_api.exception.ConflictException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.support.DefaultMessageSourceResolvable;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -32,6 +35,34 @@ public class GlobalExceptionHandler {
         logger.warn("Validation error: {}", errorMessage, ex);
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(new ApiError("Validation failed: " + errorMessage, HttpStatus.BAD_REQUEST.getReasonPhrase(), null));
+    }
+
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<ApiError> handleConflict(ConflictException e) {
+        logger.warn("Conflict: {}", e.getMessage());
+        ApiError error = new ApiError();
+        error.setMessage(e.getMessage());
+        error.setCode("CONFLICT");
+        return new ResponseEntity<>(error, HttpStatus.CONFLICT);
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<ApiError> handleDataIntegrity(DataIntegrityViolationException e) {
+        // Raised by unique/foreign key constraints, e.g. a concurrent duplicate schedule or shift.
+        logger.warn("Data integrity violation: {}", e.getMostSpecificCause().getMessage());
+        ApiError error = new ApiError();
+        error.setMessage("The request conflicts with existing data (duplicate or constraint violation)");
+        error.setCode("CONFLICT");
+        return new ResponseEntity<>(error, HttpStatus.CONFLICT);
+    }
+
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    public ResponseEntity<ApiError> handleOptimisticLock(ObjectOptimisticLockingFailureException e) {
+        logger.warn("Optimistic lock failure: {}", e.getMessage());
+        ApiError error = new ApiError();
+        error.setMessage("The record was modified by someone else. Reload and try again.");
+        error.setCode("CONFLICT");
+        return new ResponseEntity<>(error, HttpStatus.CONFLICT);
     }
 
     @ExceptionHandler(Exception.class)

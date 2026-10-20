@@ -10,9 +10,15 @@ spring:
     username: 429125
     password: "@nurs3pro.com"
     driver-class-name: com.mysql.cj.jdbc.Driver
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    # existing databases (created by ddl-auto=update) are baselined at 0, then V1 (no-op) and V2 run
+    baseline-on-migrate: true
+    baseline-version: 0
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: none
     show-sql: false
     properties:
       hibernate:

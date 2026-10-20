@@ -9,4 +9,6 @@ import java.util.List;
 @Repository
 public interface WorkloadDataRepository extends JpaRepository<WorkloadData, String> {
     List<WorkloadData> findByNurseIdAndMonthAndYear(String nurseId, int month, int year);
+
+    List<WorkloadData> findByMonthAndYear(int month, int year);
 }
