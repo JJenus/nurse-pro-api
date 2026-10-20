@@ -130,7 +130,7 @@ jobs:
           {
             echo "### Manual restart required"
             echo
-            echo "The new jar was uploaded to \\`~/nurpro.jar\\`."
+            echo "The new jar was uploaded to ~/nurpro.jar."
             echo "Restart the site in **Web > Sites** in AlwaysData to activate it."
-            echo "Add the \\`ALWAYSDATA_API_TOKEN\\` secret to automate this step."
+            echo "Add the ALWAYSDATA_API_TOKEN secret to automate this step."
           } >> "$GITHUB_STEP_SUMMARY"
