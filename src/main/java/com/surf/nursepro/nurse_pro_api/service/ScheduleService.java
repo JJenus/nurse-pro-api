@@ -3,6 +3,7 @@ package com.surf.nursepro.nurse_pro_api.service;
 import com.itextpdf.text.Paragraph;
 import com.surf.nursepro.nurse_pro_api.dto.ApiResponse;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationParams;
+import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationResult;
 import com.surf.nursepro.nurse_pro_api.dto.ShiftRequest;
 import com.surf.nursepro.nurse_pro_api.exception.ConflictException;
 import com.surf.nursepro.nurse_pro_api.util.ShiftTimes;
@@ -39,21 +40,127 @@ public class ScheduleService {
     private final SwapRequestRepository swapRequestRepository;
     private final WorkloadDataRepository workloadDataRepository;
     private final ScheduleConflictRepository conflictRepository;
+    private final ScheduleValidator scheduleValidator;
 
-    private static final int MAX_CONSECUTIVE_DAY = 3;
-    private static final int MAX_CONSECUTIVE_NIGHT = 3;
-    private static final int MIN_NURSES_PER_SHIFT = 2;
-    private static final int MAX_NURSES_PER_SHIFT = 3;
-    private static final int TARGET_SHIFTS_PER_NURSE = 14;
 
-    public ApiResponse<List<Schedule>> fetchSchedules() {
-        List<Schedule> schedules = scheduleRepository.findAll();
+    @Transactional(readOnly = true)
+    public ApiResponse<List<Schedule>> fetchSchedules(Integer month, Integer year, ScheduleStatus status) {
+        if (month != null && (month < 1 || month > 12)) {
+            throw new IllegalArgumentException("month must be between 1 and 12");
+        }
+        List<Schedule> schedules = scheduleRepository.search(year, month, status);
         logger.debug("Fetched {} schedules", schedules.size());
         return new ApiResponse<>(schedules, "Schedules fetched successfully", true);
     }
 
+    @Transactional(readOnly = true)
+    public ApiResponse<Schedule> getSchedule(String scheduleId) {
+        Schedule schedule = findSchedule(scheduleId);
+        // touch the lazy collection inside the transaction so the response is fully populated
+        schedule.getShifts().size();
+        return new ApiResponse<>(schedule, "Schedule fetched successfully", true);
+    }
+
+    @Transactional(readOnly = true)
+    public ApiResponse<List<ScheduleConflict>> getConflicts(String scheduleId) {
+        findSchedule(scheduleId);
+        return new ApiResponse<>(conflictRepository.findByScheduleId(scheduleId), "Conflicts fetched successfully", true);
+    }
+
+    /** Recomputes conflicts and workload for a schedule from its current shifts. Safe to call repeatedly. */
     @Transactional
-    public ApiResponse<Schedule> generateSchedule(ScheduleGenerationParams params) {
+    public ApiResponse<List<ScheduleConflict>> validateSchedule(String scheduleId) {
+        Schedule schedule = findSchedule(scheduleId);
+        updateWorkloadData(schedule);
+        List<ScheduleConflict> conflicts = detectConflicts(schedule);
+        return new ApiResponse<>(conflicts, conflicts.isEmpty() ? "No conflicts found"
+                : conflicts.size() + " conflict(s) found", true);
+    }
+
+    @Transactional
+    public ApiResponse<Schedule> updateScheduleStatus(String scheduleId, ScheduleStatus target) {
+        Schedule schedule = findSchedule(scheduleId);
+        ScheduleStatus current = schedule.getStatus() != null ? schedule.getStatus() : ScheduleStatus.Draft;
+
+        // Idempotent: asking for the status the schedule already has succeeds without changes.
+        if (current == target) {
+            return new ApiResponse<>(schedule, "Schedule is already " + target, true);
+        }
+        boolean allowed = switch (current) {
+            case Draft -> target == ScheduleStatus.Published || target == ScheduleStatus.Archived;
+            case Published -> target == ScheduleStatus.Draft || target == ScheduleStatus.Archived;
+            case Archived -> false;
+        };
+        if (!allowed) {
+            throw new ConflictException("Cannot move a schedule from " + current + " to " + target);
+        }
+
+        schedule.setStatus(target);
+        Schedule saved = scheduleRepository.save(schedule);
+        String message = "Schedule is now " + target;
+        if (target == ScheduleStatus.Published) {
+            long critical = conflictRepository.findByScheduleId(scheduleId).stream()
+                    .filter(c -> c.getSeverity() == ScheduleConflictSeverity.critical && !c.isResolved())
+                    .count();
+            if (critical > 0) {
+                message += " (" + critical + " critical conflict(s) still open)";
+            }
+        }
+        logger.info("Schedule {} moved from {} to {}", scheduleId, current, target);
+        return new ApiResponse<>(saved, message, true);
+    }
+
+    @Transactional(readOnly = true)
+    public ApiResponse<List<SwapRequest>> getSwapRequests(SwapRequestStatus status) {
+        List<SwapRequest> requests = status == null
+                ? swapRequestRepository.findAllByOrderByCreatedAtDesc()
+                : swapRequestRepository.findByStatusOrderByCreatedAtDesc(status);
+        return new ApiResponse<>(requests, "Swap requests fetched successfully", true);
+    }
+
+    /** Dry-run of a manual create/edit: returns the conflicts the change would cause, saves nothing. */
+    @Transactional(readOnly = true)
+    public ApiResponse<List<ScheduleConflict>> previewShift(ShiftRequest request, String shiftId) {
+        if (request == null) {
+            throw new IllegalArgumentException("Invalid shift data");
+        }
+        Schedule schedule = resolveSchedule(request);
+        assertWithinSchedule(schedule, request.getDate());
+
+        List<Shift> others = schedule.getShifts().stream()
+                .filter(sh -> shiftId == null || !shiftId.equals(sh.getId()))
+                .collect(Collectors.toList());
+
+        Shift candidate = new Shift();
+        candidate.setSchedule(schedule);
+        applyRequest(candidate, request);
+
+        Set<String> nurseIds = new HashSet<>();
+        others.forEach(sh -> nurseIds.addAll(sh.getAssignedNurses()));
+        nurseIds.addAll(candidate.getAssignedNurses());
+        List<ScheduleConflict> conflicts = scheduleValidator.validateCandidate(
+                schedule.getId(), candidate, shiftId, others, loadNurses(nurseIds));
+
+        boolean slotTaken = others.stream().anyMatch(sh -> sh.getDate().equals(request.getDate())
+                && sh.getType() == request.getType()
+                && Objects.equals(sh.getDepartment(), request.getDepartment()));
+        if (slotTaken) {
+            ScheduleConflict clash = new ScheduleConflict();
+            clash.setScheduleId(schedule.getId());
+            clash.setShiftId(shiftId);
+            clash.setDate(request.getDate());
+            clash.setType(ScheduleConflictType.overlap);
+            clash.setSeverity(ScheduleConflictSeverity.critical);
+            clash.setMessage("A " + request.getType() + " shift for " + request.getDepartment()
+                    + " already exists on " + request.getDate());
+            clash.setSuggestions(new ArrayList<>(List.of("Edit the existing shift instead")));
+            conflicts.add(clash);
+        }
+        return new ApiResponse<>(conflicts, conflicts.isEmpty() ? "No conflicts" : conflicts.size() + " conflict(s)", true);
+    }
+
+    @Transactional
+    public ApiResponse<ScheduleGenerationResult> generateSchedule(ScheduleGenerationParams params) {
         if (params == null || params.getMonth() < 1 || params.getMonth() > 12 || params.getYear() < 2000) {
             logger.warn("Invalid schedule generation parameters: {}", params);
             throw new IllegalArgumentException("Invalid month or year");
@@ -62,6 +169,11 @@ public class ScheduleService {
         if (scheduleRepository.existsByMonthAndYear(params.getMonth(), params.getYear())) {
             logger.warn("Schedule already exists for month {} and year {}", params.getMonth(), params.getYear());
             throw new ConflictException("Schedule already exists for month " + params.getMonth() + " and year " + params.getYear());
+        }
+
+        ScheduleGenerationParams.Constraints constraints = params.effectiveConstraints();
+        if (constraints.getMaxNursesPerShift() < constraints.getMinNursesPerShift()) {
+            throw new IllegalArgumentException("maxNursesPerShift must be greater than or equal to minNursesPerShift");
         }
 
         List<Nurse> nurses = nurseRepository.findAll();
@@ -90,17 +202,10 @@ public class ScheduleService {
             Collections.shuffle(shiftTypes);
 
             for (ShiftType shiftType : shiftTypes) {
-                Shift shift = createShift(currentDate, shiftType);
-                List<Nurse> eligibleNurses = findEligibleNurses(nurses, states, assignedToday, shiftType, currentDate);
+                Shift shift = createShift(currentDate, shiftType, constraints.getMinNursesPerShift());
+                List<Nurse> eligibleNurses = findEligibleNurses(nurses, states, assignedToday, shiftType, currentDate, constraints);
 
-                int numToAssign = Math.min(
-                        Math.max(MIN_NURSES_PER_SHIFT, eligibleNurses.size()),
-                        MAX_NURSES_PER_SHIFT
-                );
-
-                if (eligibleNurses.size() >= MAX_NURSES_PER_SHIFT && Math.random() > 0.7) {
-                    numToAssign = MAX_NURSES_PER_SHIFT;
-                }
+                int numToAssign = Math.min(eligibleNurses.size(), constraints.getMaxNursesPerShift());
 
                 if (eligibleNurses.isEmpty()) {
                     logger.warn("No eligible nurses for shift: {} on {}", shiftType, currentDate);
@@ -129,18 +234,19 @@ public class ScheduleService {
         schedule.setShifts(shifts);
         Schedule savedSchedule = scheduleRepository.save(schedule);
         updateWorkloadData(savedSchedule);
-        detectConflicts(savedSchedule);
+        List<ScheduleConflict> conflicts = detectConflicts(savedSchedule);
+        List<WorkloadData> stats = workloadDataRepository.findByMonthAndYear(savedSchedule.getMonth(), savedSchedule.getYear());
 
         logger.info("Generated schedule ID: {} for {}/{}", savedSchedule.getId(), params.getMonth(), params.getYear());
-        return new ApiResponse<>(savedSchedule, "Schedule generated successfully", true);
+        return new ApiResponse<>(new ScheduleGenerationResult(savedSchedule, conflicts, stats), "Schedule generated successfully", true);
     }
 
-    private Shift createShift(LocalDate date, ShiftType type) {
+    private Shift createShift(LocalDate date, ShiftType type, int requiredStaff) {
         Shift shift = new Shift();
         shift.setDate(date);
         shift.setType(type);
         shift.setDepartment("General");
-        shift.setRequiredStaff(MIN_NURSES_PER_SHIFT);
+        shift.setRequiredStaff(requiredStaff);
 
         switch (type) {
             case Day:
@@ -162,13 +268,14 @@ public class ScheduleService {
 
     private List<Nurse> findEligibleNurses(List<Nurse> nurses, Map<String, NurseState> states,
                                            Set<String> assignedToday, ShiftType shiftType,
-                                           LocalDate currentDate) {
+                                           LocalDate currentDate,
+                                           ScheduleGenerationParams.Constraints constraints) {
         String currentType = shiftType == ShiftType.Night ? "night" : "day";
         List<Nurse> eligible = new ArrayList<>();
 
         for (Nurse nurse : nurses) {
             if (assignedToday.contains(nurse.getId()) ||
-                    nurse.getUnavailableDates().contains(currentDate)) {
+                    (nurse.getUnavailableDates() != null && nurse.getUnavailableDates().contains(currentDate))) {
                 continue;
             }
 
@@ -180,7 +287,8 @@ public class ScheduleService {
             boolean canAssign = true;
             if (state.lastWorkDay == currentDate.getDayOfMonth() - 1) {
                 if (state.lastType != null && state.lastType.equals(currentType)) {
-                    int maxConsecutive = currentType.equals("day") ? MAX_CONSECUTIVE_DAY : MAX_CONSECUTIVE_NIGHT;
+                    int maxConsecutive = currentType.equals("day")
+                            ? constraints.getMaxConsecutiveDay() : constraints.getMaxConsecutiveNight();
                     if (state.consecutive + 1 > maxConsecutive) {
                         canAssign = false;
                     }
@@ -315,35 +423,43 @@ public class ScheduleService {
         logger.debug("Updated workload data for {} nurses", toSave.size());
     }
 
-    private void detectConflicts(Schedule schedule) {
-        // Conflicts are derived data: drop the previous set for this schedule, then insert the current one.
+    /** Conflicts are derived data: drop the previous set for the schedule and store the current one. */
+    private List<ScheduleConflict> detectConflicts(Schedule schedule) {
         conflictRepository.deleteByScheduleId(schedule.getId());
-        List<ScheduleConflict> conflicts = new ArrayList<>();
 
-        for (Shift shift : schedule.getShifts()) {
-            if (shift.getAssignedNurses().size() < shift.getRequiredStaff()) {
-                ScheduleConflict conflict = new ScheduleConflict();
-                conflict.setType(ScheduleConflictType.understaffed);
-                conflict.setSeverity(shift.getAssignedNurses().isEmpty() ?
-                        ScheduleConflictSeverity.critical : ScheduleConflictSeverity.high);
-                conflict.setScheduleId(schedule.getId());
-                conflict.setShiftId(shift.getId());
-                conflict.setDate(shift.getDate());
-                conflict.setResolved(false);
-                conflict.setMessage(String.format("%s %s shift needs %d more nurse(s)",
-                        shift.getDepartment(), shift.getType(),
-                        shift.getRequiredStaff() - shift.getAssignedNurses().size()));
-                conflict.setSuggestions(Arrays.asList(
-                        "Check for available nurses with matching qualifications",
-                        "Consider overtime assignments",
-                        "Review shift requirements"
-                ));
-                conflicts.add(conflict);
-            }
-        }
+        Set<String> nurseIds = new HashSet<>();
+        schedule.getShifts().forEach(sh -> nurseIds.addAll(sh.getAssignedNurses()));
+        List<ScheduleConflict> conflicts = scheduleValidator.validate(
+                schedule.getId(), schedule.getShifts(), loadNurses(nurseIds));
 
         conflictRepository.saveAll(conflicts);
         logger.debug("Detected {} conflicts for schedule {}", conflicts.size(), schedule.getId());
+        return conflicts;
+    }
+
+    private Map<String, Nurse> loadNurses(Collection<String> nurseIds) {
+        if (nurseIds.isEmpty()) {
+            return new HashMap<>();
+        }
+        Map<String, Nurse> byId = new HashMap<>();
+        for (Nurse nurse : nurseRepository.findAllById(nurseIds)) {
+            byId.put(nurse.getId(), nurse);
+        }
+        return byId;
+    }
+
+    private Schedule findSchedule(String scheduleId) {
+        if (scheduleId == null || scheduleId.isBlank()) {
+            throw new IllegalArgumentException("Invalid schedule ID");
+        }
+        return scheduleRepository.findById(scheduleId)
+                .orElseThrow(() -> new IllegalArgumentException("Schedule not found"));
+    }
+
+    private void assertEditable(Schedule schedule) {
+        if (schedule != null && schedule.getStatus() == ScheduleStatus.Archived) {
+            throw new ConflictException("This schedule is archived and cannot be modified");
+        }
     }
 
     @Transactional
@@ -352,6 +468,7 @@ public class ScheduleService {
             throw new IllegalArgumentException("Invalid shift data");
         }
         Schedule schedule = resolveSchedule(request);
+        assertEditable(schedule);
         assertWithinSchedule(schedule, request.getDate());
         assertNursesExist(request.getAssignedNurses());
         assertSlotFree(schedule, request, null);
@@ -381,6 +498,7 @@ public class ScheduleService {
 
         // Shifts created before schedule_id existed may still be unattached; attach them on first edit.
         Schedule schedule = shift.getSchedule() != null ? shift.getSchedule() : resolveSchedule(request);
+        assertEditable(schedule);
         assertWithinSchedule(schedule, request.getDate());
         assertNursesExist(request.getAssignedNurses());
         assertSlotFree(schedule, request, shiftId);
@@ -402,6 +520,10 @@ public class ScheduleService {
         if (!shiftRepository.existsById(shiftId)) {
             logger.info("Shift {} already deleted", shiftId);
             return new ApiResponse<>(null, "Shift already deleted", true);
+        }
+        Shift existing = shiftRepository.findById(shiftId).orElse(null);
+        if (existing != null) {
+            assertEditable(existing.getSchedule());
         }
         conflictRepository.deleteByShiftId(shiftId);
         shiftRepository.deleteById(shiftId);
@@ -480,7 +602,7 @@ public class ScheduleService {
     }
 
     @Transactional
-    public ApiResponse<SwapRequest> approveSwapRequest(String requestId) {
+    public ApiResponse<SwapRequest> approveSwapRequest(String requestId, String reviewer) {
         if (requestId == null) {
             logger.warn("Invalid swap request ID: {}", requestId);
             throw new IllegalArgumentException("Invalid swap request ID");
@@ -492,14 +614,14 @@ public class ScheduleService {
                 });
         request.setStatus(SwapRequestStatus.Approved);
         request.setUpdatedAt(LocalDateTime.now());
-        request.setReviewedBy("Admin");
+        request.setReviewedBy(reviewer);
         SwapRequest savedRequest = swapRequestRepository.save(request);
         logger.info("Approved swap request ID: {}", savedRequest.getId());
         return new ApiResponse<>(savedRequest, "Swap request approved", true);
     }
 
     @Transactional
-    public ApiResponse<SwapRequest> rejectSwapRequest(String requestId) {
+    public ApiResponse<SwapRequest> rejectSwapRequest(String requestId, String reviewer) {
         if (requestId == null) {
             logger.warn("Invalid swap request ID: {}", requestId);
             throw new IllegalArgumentException("Invalid swap request ID");
@@ -511,7 +633,7 @@ public class ScheduleService {
                 });
         request.setStatus(SwapRequestStatus.Rejected);
         request.setUpdatedAt(LocalDateTime.now());
-        request.setReviewedBy("Admin");
+        request.setReviewedBy(reviewer);
         SwapRequest savedRequest = swapRequestRepository.save(request);
         logger.info("Rejected swap request ID: {}", savedRequest.getId());
         return new ApiResponse<>(savedRequest, "Swap request rejected", true);

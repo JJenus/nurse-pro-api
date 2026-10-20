@@ -3,7 +3,14 @@ package com.surf.nursepro.nurse_pro_api.controller;
 import com.surf.nursepro.nurse_pro_api.dto.ApiResponse;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationParams;
 import com.surf.nursepro.nurse_pro_api.entity.Schedule;
+import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationResult;
+import com.surf.nursepro.nurse_pro_api.dto.ScheduleStatusRequest;
 import com.surf.nursepro.nurse_pro_api.dto.ShiftRequest;
+import com.surf.nursepro.nurse_pro_api.entity.ScheduleConflict;
+import com.surf.nursepro.nurse_pro_api.enums.ScheduleStatus;
+import com.surf.nursepro.nurse_pro_api.enums.SwapRequestStatus;
+import org.springframework.security.authentication.AnonymousAuthenticationToken;
+import org.springframework.security.core.Authentication;
 import com.surf.nursepro.nurse_pro_api.entity.Shift;
 import com.surf.nursepro.nurse_pro_api.entity.SwapRequest;
 import com.surf.nursepro.nurse_pro_api.entity.WorkloadData;
@@ -28,15 +35,50 @@ public class ScheduleController {
     private final ScheduleService scheduleService;
 
     @GetMapping
-    @Operation(summary = "Get all schedules")
-    public ResponseEntity<ApiResponse<List<Schedule>>> getSchedules() {
-        return ResponseEntity.ok(scheduleService.fetchSchedules());
+    @Operation(summary = "List schedules, optionally filtered by month, year and status")
+    public ResponseEntity<ApiResponse<List<Schedule>>> getSchedules(
+            @RequestParam(required = false) Integer month,
+            @RequestParam(required = false) Integer year,
+            @RequestParam(required = false) ScheduleStatus status) {
+        return ResponseEntity.ok(scheduleService.fetchSchedules(month, year, status));
+    }
+
+    @GetMapping("/{scheduleId}")
+    @Operation(summary = "Get one schedule with its shifts")
+    public ResponseEntity<ApiResponse<Schedule>> getSchedule(@PathVariable String scheduleId) {
+        return ResponseEntity.ok(scheduleService.getSchedule(scheduleId));
+    }
+
+    @GetMapping("/{scheduleId}/conflicts")
+    @Operation(summary = "Get the stored conflicts of a schedule")
+    public ResponseEntity<ApiResponse<List<ScheduleConflict>>> getConflicts(@PathVariable String scheduleId) {
+        return ResponseEntity.ok(scheduleService.getConflicts(scheduleId));
+    }
+
+    @PostMapping("/{scheduleId}/validate")
+    @Operation(summary = "Recompute conflicts and workload for a schedule")
+    public ResponseEntity<ApiResponse<List<ScheduleConflict>>> validateSchedule(@PathVariable String scheduleId) {
+        return ResponseEntity.ok(scheduleService.validateSchedule(scheduleId));
+    }
+
+    @PutMapping("/{scheduleId}/status")
+    @Operation(summary = "Publish, unpublish or archive a schedule")
+    public ResponseEntity<ApiResponse<Schedule>> updateScheduleStatus(
+            @PathVariable String scheduleId, @Valid @RequestBody ScheduleStatusRequest request) {
+        return ResponseEntity.ok(scheduleService.updateScheduleStatus(scheduleId, request.getStatus()));
     }
 
     @PostMapping("/generate")
     @Operation(summary = "Generate new schedule")
-    public ResponseEntity<ApiResponse<Schedule>> generateSchedule(@Valid @RequestBody ScheduleGenerationParams params) {
+    public ResponseEntity<ApiResponse<ScheduleGenerationResult>> generateSchedule(@Valid @RequestBody ScheduleGenerationParams params) {
         return ResponseEntity.ok(scheduleService.generateSchedule(params));
+    }
+
+    @PostMapping("/shifts/validate")
+    @Operation(summary = "Check a proposed shift (or edit, with shiftId) for conflicts without saving it")
+    public ResponseEntity<ApiResponse<List<ScheduleConflict>>> previewShift(
+            @Valid @RequestBody ShiftRequest shift, @RequestParam(required = false) String shiftId) {
+        return ResponseEntity.ok(scheduleService.previewShift(shift, shiftId));
     }
 
     @PostMapping("/shifts")
@@ -63,16 +105,23 @@ public class ScheduleController {
         return ResponseEntity.ok(scheduleService.createSwapRequest(request));
     }
 
+    @GetMapping("/swap-requests")
+    @Operation(summary = "List swap requests, optionally by status")
+    public ResponseEntity<ApiResponse<List<SwapRequest>>> getSwapRequests(
+            @RequestParam(required = false) SwapRequestStatus status) {
+        return ResponseEntity.ok(scheduleService.getSwapRequests(status));
+    }
+
     @PutMapping("/swap-requests/{requestId}/approve")
     @Operation(summary = "Approve swap request")
-    public ResponseEntity<ApiResponse<SwapRequest>> approveSwapRequest(@PathVariable String requestId) {
-        return ResponseEntity.ok(scheduleService.approveSwapRequest(requestId));
+    public ResponseEntity<ApiResponse<SwapRequest>> approveSwapRequest(@PathVariable String requestId, Authentication authentication) {
+        return ResponseEntity.ok(scheduleService.approveSwapRequest(requestId, reviewer(authentication)));
     }
 
     @PutMapping("/swap-requests/{requestId}/reject")
     @Operation(summary = "Reject swap request")
-    public ResponseEntity<ApiResponse<SwapRequest>> rejectSwapRequest(@PathVariable String requestId) {
-        return ResponseEntity.ok(scheduleService.rejectSwapRequest(requestId));
+    public ResponseEntity<ApiResponse<SwapRequest>> rejectSwapRequest(@PathVariable String requestId, Authentication authentication) {
+        return ResponseEntity.ok(scheduleService.rejectSwapRequest(requestId, reviewer(authentication)));
     }
 
     @GetMapping("/workload")
@@ -98,5 +147,12 @@ public class ScheduleController {
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + fileName + "\"")
                 .contentType(format.equalsIgnoreCase("pdf") ? MediaType.APPLICATION_PDF : MediaType.APPLICATION_OCTET_STREAM)
                 .body(response.getData());
+    }
+
+    private String reviewer(Authentication authentication) {
+        if (authentication == null || authentication instanceof AnonymousAuthenticationToken) {
+            return "system";
+        }
+        return authentication.getName();
     }
 }

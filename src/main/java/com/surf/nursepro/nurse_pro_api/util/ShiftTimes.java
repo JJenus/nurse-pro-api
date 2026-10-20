@@ -31,4 +31,16 @@ public final class ShiftTimes {
             return DEFAULT_HOURS;
         }
     }
+
+    /** True when the shift ends on the next calendar day (e.g. 23:00-07:00). Unparseable times are treated as same-day. */
+    public static boolean crossesMidnight(String start, String end) {
+        if (start == null || end == null) {
+            return false;
+        }
+        try {
+            return !LocalTime.parse(end).isAfter(LocalTime.parse(start));
+        } catch (DateTimeParseException e) {
+            return false;
+        }
+    }
 }

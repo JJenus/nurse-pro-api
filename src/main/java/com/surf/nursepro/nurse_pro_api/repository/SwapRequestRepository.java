@@ -10,4 +10,8 @@ import java.util.List;
 @Repository
 public interface SwapRequestRepository extends JpaRepository<SwapRequest, String> {
     List<SwapRequest> findByStatus(SwapRequestStatus status);
+
+    List<SwapRequest> findAllByOrderByCreatedAtDesc();
+
+    List<SwapRequest> findByStatusOrderByCreatedAtDesc(SwapRequestStatus status);
 }

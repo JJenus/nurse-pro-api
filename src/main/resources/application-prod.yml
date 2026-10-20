@@ -23,6 +23,8 @@ spring:
     properties:
       hibernate:
         dialect: org.hibernate.dialect.MySQLDialect
+        # batch-load lazy collections (shifts, assigned nurses) instead of one query per row
+        default_batch_fetch_size: 100
   security:
     jwt:
       secret: your-prod-jwt-secret-key

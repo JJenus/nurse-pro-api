@@ -4,7 +4,8 @@ import lombok.Getter;
 
 public enum ScheduleConflictType {
     understaffed("understaffed"), overstaffed("overstaffed"), qualification("qualification"),
-    availability("availability"), overtime("overtime");
+    availability("availability"), overtime("overtime"),
+    overlap("overlap");
 
     @Getter
     private final String value;
