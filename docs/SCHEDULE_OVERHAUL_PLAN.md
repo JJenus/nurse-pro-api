@@ -57,6 +57,18 @@ Deterministic, seedable, constraint-based.
 
 ## Phase 4: Swaps, idempotency, duplicates
 
+Status: backend and frontend done on `feature/schedule-overhaul` (backend not compiled or run; frontend type-checks with no new errors and `vite build` passes).
+
+- [x] Swap state machine: Pending to Approved / Rejected / Cancelled. Repeating the same action is a no-op; any other transition is a 409. New `PUT /swap-requests/{id}/cancel`.
+- [x] Atomic approve: row lock on the request, both shifts re-checked, nurses swapped, request marked approved, conflicts and workload refreshed, other pending requests on those shifts cancelled as superseded.
+- [x] Validation at create and again at approve: requester must own the shift, no self-swap, past shifts and archived schedules are rejected, target must not already be on the shift, and the swap must not introduce new conflicts (unavailable, double-booked) under the shared `ScheduleValidator`. `SwapPlanner` computes the outcome as a pure function.
+- [x] One pending swap per `(shiftId, requesterId)`: checked in the service and enforced by a unique key over a generated column (V4).
+- [x] `Idempotency-Key` on generate: same key and same request returns the original schedule; same key with a different request is a 409; keys expire after 24 hours. The generator sends one key per attempt and renews it when the form changes.
+- [x] Atomic move endpoint (`POST /schedules/shifts/move`) replaces the two separate updates behind drag and drop; repeating a completed move is a no-op.
+- [x] Client retries only GET/HEAD/OPTIONS.
+- [ ] Swap approval screen showing the validation result, and a cancel button in the UI (the store action exists).
+
+
 - Swap state machine: Pending to Approved / Rejected / Cancelled; invalid transitions return 409.
 - Approve is atomic: lock both shifts, validate, swap `assignedNurses`, mark approved, refresh conflicts and workload. Re-approve returns the same result.
 - Swap validation: owner-only request, no self-swap, no past shifts, no same-shift swap, target not already working or unavailable. One pending swap per `(shiftId, requesterId)`.
