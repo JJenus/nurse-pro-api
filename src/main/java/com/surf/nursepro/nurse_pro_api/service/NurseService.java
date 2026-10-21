@@ -4,6 +4,7 @@ import com.surf.nursepro.nurse_pro_api.dto.ApiResponse;
 import com.surf.nursepro.nurse_pro_api.dto.NurseStatus;
 import com.surf.nursepro.nurse_pro_api.entity.Nurse;
 import com.surf.nursepro.nurse_pro_api.enums.ExperienceLevel;
+import com.surf.nursepro.nurse_pro_api.exception.ConflictException;
 import com.surf.nursepro.nurse_pro_api.repository.NurseRepository;
 import com.surf.nursepro.nurse_pro_api.repository.ShiftRepository;
 import jakarta.persistence.criteria.Predicate;
@@ -22,6 +23,7 @@ import java.util.List;
 public class NurseService {
     private final NurseRepository nurseRepository;
     private final ShiftRepository shiftRepository;
+    private final ScheduleService scheduleService;
 
     @Transactional
     public ApiResponse<Nurse> createNurse(Nurse nurse) {
@@ -92,11 +94,18 @@ public class NurseService {
         nurse.setUnavailableDates(updatedNurse.getUnavailableDates());
         nurse.setUpdatedAt(LocalDateTime.now());
         Nurse savedNurse = nurseRepository.save(nurse);
+        // availability may have changed: refresh the conflicts of the schedules this nurse still works in
+        scheduleService.revalidateSchedulesForNurse(id);
         return new ApiResponse<>(savedNurse, "Nurse updated successfully", true);
     }
 
     @Transactional
     public ApiResponse<Void> deleteNurse(String id) {
+        long upcoming = scheduleService.countUpcomingShifts(id);
+        if (upcoming > 0) {
+            throw new ConflictException("This nurse still has " + upcoming + " upcoming shift(s). Reschedule them "
+                    + "(exclude this nurse) before deleting.");
+        }
         nurseRepository.deleteById(id);
         return new ApiResponse<>(null, "Nurse deleted successfully", true);
     }

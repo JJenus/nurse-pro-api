@@ -5,6 +5,8 @@ import com.surf.nursepro.nurse_pro_api.dto.ApiResponse;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.surf.nursepro.nurse_pro_api.dto.MoveNurseRequest;
+import com.surf.nursepro.nurse_pro_api.dto.RescheduleRequest;
+import com.surf.nursepro.nurse_pro_api.dto.RescheduleResult;
 import com.surf.nursepro.nurse_pro_api.dto.SwapRequestCreate;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationParams;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationResult;
@@ -18,6 +20,9 @@ import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.authentication.AnonymousAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -52,6 +57,8 @@ public class ScheduleService {
     private final ScheduleValidator scheduleValidator;
     private final SwapPlanner swapPlanner;
     private final ScheduleGenerator scheduleGenerator;
+    private final ReschedulePlanner reschedulePlanner;
+    private final ScheduleChangeRepository scheduleChangeRepository;
     private final IdempotencyKeyRepository idempotencyKeyRepository;
     private final ObjectMapper objectMapper;
 
@@ -117,6 +124,7 @@ public class ScheduleService {
 
         schedule.setStatus(target);
         Schedule saved = scheduleRepository.save(schedule);
+        recordChange(saved, "STATUS_CHANGED", null, null, null, current + " -> " + target);
         String message = "Schedule is now " + target;
         if (target == ScheduleStatus.Published) {
             long critical = conflictRepository.findByScheduleId(scheduleId).stream()
@@ -426,6 +434,7 @@ public class ScheduleService {
         Shift savedShift = shiftRepository.save(shift);
         ensureInSchedule(schedule, savedShift);
         refreshDerivedData(schedule);
+        auditIfPublished(schedule, "SHIFT_CREATED", savedShift.getId(), null, describe(savedShift));
         logger.info("Created shift ID: {}", savedShift.getId());
         return new ApiResponse<>(savedShift, "Shift created successfully", true);
     }
@@ -457,6 +466,7 @@ public class ScheduleService {
         Shift savedShift = shiftRepository.save(shift);
         ensureInSchedule(schedule, savedShift);
         refreshDerivedData(schedule);
+        auditIfPublished(schedule, "SHIFT_UPDATED", savedShift.getId(), null, describe(savedShift));
         logger.info("Updated shift ID: {}", savedShift.getId());
         return new ApiResponse<>(savedShift, "Shift updated successfully", true);
     }
@@ -476,15 +486,198 @@ public class ScheduleService {
         Schedule schedule = existing != null ? existing.getSchedule() : null;
         assertEditable(schedule);
         conflictRepository.deleteByShiftId(shiftId);
+        String deletedDescription = existing != null ? describe(existing) : null;
         if (schedule != null) {
             schedule.getShifts().removeIf(sh -> shiftId.equals(sh.getId()));
         }
         shiftRepository.deleteById(shiftId);
         if (schedule != null) {
             refreshDerivedData(schedule);
+            auditIfPublished(schedule, "SHIFT_DELETED", shiftId, null, deletedDescription);
         }
         logger.info("Deleted shift ID: {}", shiftId);
         return new ApiResponse<>(null, "Shift deleted successfully", true);
+    }
+
+    /**
+     * Reschedules a date range of a schedule. Past dates are never touched. By default this is a dry run that returns
+     * the proposed changes; applying needs the {@code revision} and {@code seed} of that preview, so the schedule
+     * cannot have changed in between and the result matches what the manager approved.
+     */
+    @Transactional
+    public ApiResponse<RescheduleResult> reschedule(String scheduleId, RescheduleRequest request) {
+        Schedule schedule = findSchedule(scheduleId);
+        assertEditable(schedule);
+
+        LocalDate monthStart = LocalDate.of(schedule.getYear(), schedule.getMonth(), 1);
+        LocalDate monthEnd = monthStart.withDayOfMonth(monthStart.lengthOfMonth());
+        LocalDate from = request.getFromDate();
+        if (from.isBefore(monthStart)) from = monthStart;
+        if (from.isBefore(today())) from = today();           // the past is immutable
+        LocalDate to = request.getToDate() != null ? request.getToDate() : monthEnd;
+        if (to.isAfter(monthEnd)) to = monthEnd;
+        if (to.isBefore(from)) {
+            throw new IllegalArgumentException("There is nothing to reschedule: the range is in the past or outside the schedule's month");
+        }
+
+        Set<String> excluded = request.getExcludeNurseIds() == null ? new HashSet<>() : request.getExcludeNurseIds();
+        assertNursesExist(excluded);
+
+        boolean dryRun = request.isDryRun();
+        String revision = revisionOf(schedule);
+        if (!dryRun) {
+            if (request.getRevision() == null || request.getSeed() == null) {
+                throw new IllegalArgumentException("revision and seed from the preview are required to apply a reschedule");
+            }
+            if (!revision.equals(request.getRevision())) {
+                throw new ConflictException("The schedule changed after the preview was made. Preview the reschedule again.");
+            }
+        }
+
+        List<Nurse> nurses = nurseRepository.findAll();
+        if (nurses.isEmpty()) {
+            throw new IllegalArgumentException("No nurses available for scheduling");
+        }
+
+        ReschedulePlanner.Input input = new ReschedulePlanner.Input();
+        input.setScheduleId(schedule.getId());
+        input.setYear(schedule.getYear());
+        input.setMonth(schedule.getMonth());
+        input.setNurses(nurses);
+        input.setScheduleShifts(new ArrayList<>(schedule.getShifts()));
+        input.setNeighbourShifts(loadNeighbourShifts(schedule, from.minusDays(14), to.plusDays(14)));
+        input.setFrom(from);
+        input.setTo(to);
+        input.setMode(request.getMode() != null ? request.getMode() : RescheduleMode.FILL_GAPS);
+        input.setExcludedNurseIds(excluded);
+        input.setLockedShiftIds(request.getLockedShiftIds() == null ? new HashSet<>() : request.getLockedShiftIds());
+        input.setConstraints(request.getConstraints() != null ? request.getConstraints()
+                : new ScheduleGenerationParams.Constraints());
+        input.setSeed(request.getSeed());
+
+        ReschedulePlanner.Plan plan = reschedulePlanner.plan(input);
+        RescheduleResult result = plan.getResult();
+        result.setRevision(revision);
+
+        if (dryRun) {
+            return new ApiResponse<>(result, result.getChanges().isEmpty()
+                    ? "Nothing needs to change" : result.getChanges().size() + " shift(s) would change", true);
+        }
+
+        Map<String, Shift> existing = new HashMap<>();
+        schedule.getShifts().forEach(sh -> existing.put(sh.getId(), sh));
+        for (RescheduleResult.ShiftChange change : result.getChanges()) {
+            if (change.isNewShift()) {
+                Shift template = plan.getNewShiftsByKey().get(ScheduleGenerator.slotKey(change.getDate(), change.getType()));
+                Shift created = new Shift();
+                created.setSchedule(schedule);
+                created.setDate(template.getDate());
+                created.setType(template.getType());
+                created.setDepartment(template.getDepartment());
+                created.setStartTime(template.getStartTime());
+                created.setEndTime(template.getEndTime());
+                created.setRequiredStaff(template.getRequiredStaff());
+                created.setAssignedNurses(new LinkedHashSet<>(template.getAssignedNurses()));
+                Shift saved = shiftRepository.save(created);
+                schedule.getShifts().add(saved);
+            } else {
+                Shift shift = existing.get(change.getShiftId());
+                shift.getAssignedNurses().removeAll(change.getRemoved());
+                shift.getAssignedNurses().addAll(change.getAdded());
+                shiftRepository.save(shift);
+            }
+        }
+
+        refreshDerivedData(schedule);
+        recordChange(schedule, "RESCHEDULE", null, null, request.getReason(),
+                String.format("%s %s to %s: %d shift(s) changed, %d created, +%d/-%d nurse assignments, excluded=%s",
+                        input.getMode(), from, to, result.getShiftsChanged(), result.getShiftsCreated(),
+                        result.getNursesAdded(), result.getNursesRemoved(), excluded));
+
+        result.setApplied(true);
+        result.setRevision(null);   // the schedule has a new revision now; reload it
+        result.setConflicts(conflictRepository.findByScheduleId(schedule.getId()));
+        logger.info("Rescheduled schedule {} from {} to {}", scheduleId, from, to);
+        return new ApiResponse<>(result, "Reschedule applied", true);
+    }
+
+    @Transactional(readOnly = true)
+    public ApiResponse<List<ScheduleChange>> getChanges(String scheduleId) {
+        findSchedule(scheduleId);
+        return new ApiResponse<>(scheduleChangeRepository.findByScheduleIdOrderByCreatedAtDesc(scheduleId),
+                "Changes fetched successfully", true);
+    }
+
+    /** Re-checks the upcoming part of every open schedule a nurse works in, e.g. after their availability changed. */
+    @Transactional
+    public void revalidateSchedulesForNurse(String nurseId) {
+        for (Schedule schedule : scheduleRepository.findOpenWithUpcomingShiftsOf(nurseId, today(), ScheduleStatus.Archived)) {
+            detectConflicts(schedule);
+        }
+    }
+
+    @Transactional(readOnly = true)
+    public long countUpcomingShifts(String nurseId) {
+        return shiftRepository.countUpcomingForNurse(nurseId, today());
+    }
+
+    /** Neighbouring months' shifts near the range: they constrain rest and consecutive-day rules at the edges. */
+    private List<Shift> loadNeighbourShifts(Schedule schedule, LocalDate windowStart, LocalDate windowEnd) {
+        LocalDate first = LocalDate.of(schedule.getYear(), schedule.getMonth(), 1);
+        List<Shift> result = new ArrayList<>();
+        for (LocalDate month : List.of(first.minusMonths(1), first.plusMonths(1))) {
+            scheduleRepository.findByMonthAndYear(month.getMonthValue(), month.getYear()).ifPresent(neighbour -> {
+                for (Shift sh : neighbour.getShifts()) {
+                    if (sh.getDate() != null && !sh.getDate().isBefore(windowStart) && !sh.getDate().isAfter(windowEnd)) {
+                        result.add(sh);
+                    }
+                }
+            });
+        }
+        return result;
+    }
+
+    /** Changes whenever any shift of the schedule or its assignments change; used to detect a stale preview. */
+    private String revisionOf(Schedule schedule) {
+        List<String> parts = new ArrayList<>();
+        for (Shift sh : schedule.getShifts()) {
+            List<String> nurses = new ArrayList<>(sh.getAssignedNurses());
+            Collections.sort(nurses);
+            parts.add(sh.getId() + ":" + sh.getVersion() + ":" + String.join(",", nurses));
+        }
+        Collections.sort(parts);
+        return hashOf(String.join(";", parts));
+    }
+
+    private String currentActor() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || authentication instanceof AnonymousAuthenticationToken) {
+            return "system";
+        }
+        return authentication.getName();
+    }
+
+    private void recordChange(Schedule schedule, String action, String shiftId, String nurseId, String reason, String details) {
+        ScheduleChange change = new ScheduleChange();
+        change.setScheduleId(schedule.getId());
+        change.setShiftId(shiftId);
+        change.setNurseId(nurseId);
+        change.setAction(action);
+        change.setActor(currentActor());
+        change.setReason(reason);
+        change.setDetails(details);
+        scheduleChangeRepository.save(change);
+    }
+
+    /** Edits to a published schedule are what people need an audit trail for; drafts are not logged. */
+    private void auditIfPublished(Schedule schedule, String action, String shiftId, String nurseId, String details) {
+        if (schedule != null && schedule.getStatus() == ScheduleStatus.Published) {
+            recordChange(schedule, action, shiftId, nurseId, null, details);
+        }
+    }
+
+    private String describe(Shift shift) {
+        return shift.getDate() + " " + shift.getType() + " " + shift.getAssignedNurses();
     }
 
     /** Conflicts and workload are derived from the shifts, so they are refreshed whenever the shifts change. */
@@ -666,6 +859,10 @@ public class ScheduleService {
         }
 
         refreshDerivedDataFor(affected);
+        for (Shift shift : affected) {
+            auditIfPublished(shift.getSchedule(), "SWAP_APPROVED", shift.getId(), request.getRequesterId(),
+                    "swap " + savedRequest.getId() + ": " + describe(shift));
+        }
         logger.info("Approved swap request ID: {}", savedRequest.getId());
         return new ApiResponse<>(savedRequest, "Swap request approved", true);
     }
@@ -745,6 +942,11 @@ public class ScheduleService {
         }
         shiftRepository.saveAll(changed);
         refreshDerivedDataFor(changed);
+        for (Shift shift : changed) {
+            boolean removedFrom = shift == from;
+            auditIfPublished(shift.getSchedule(), "NURSE_MOVED", shift.getId(), nurseId,
+                    (removedFrom ? "removed from " : "added to ") + describe(shift));
+        }
         return new ApiResponse<>(changed, "Nurse moved successfully", true);
     }
 

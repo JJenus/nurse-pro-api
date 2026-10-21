@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 
@@ -21,4 +22,10 @@ public interface ScheduleRepository extends JpaRepository<Schedule, String> {
             + "and (:status is null or s.status = :status) order by s.year desc, s.month desc")
     List<Schedule> search(@Param("year") Integer year, @Param("month") Integer month,
                           @Param("status") ScheduleStatus status);
+
+    /** Schedules (other than {@code excluded} status) in which the nurse still has shifts on or after {@code from}. */
+    @Query("select distinct s from Schedule s join s.shifts sh where :nurseId member of sh.assignedNurses "
+            + "and sh.date >= :from and s.status <> :excluded")
+    List<Schedule> findOpenWithUpcomingShiftsOf(@Param("nurseId") String nurseId, @Param("from") LocalDate from,
+                                                @Param("excluded") ScheduleStatus excluded);
 }

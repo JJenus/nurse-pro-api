@@ -6,6 +6,9 @@ import com.surf.nursepro.nurse_pro_api.entity.Schedule;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationResult;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleStatusRequest;
 import com.surf.nursepro.nurse_pro_api.dto.MoveNurseRequest;
+import com.surf.nursepro.nurse_pro_api.dto.RescheduleRequest;
+import com.surf.nursepro.nurse_pro_api.dto.RescheduleResult;
+import com.surf.nursepro.nurse_pro_api.entity.ScheduleChange;
 import com.surf.nursepro.nurse_pro_api.dto.ShiftRequest;
 import com.surf.nursepro.nurse_pro_api.dto.SwapRequestCreate;
 import com.surf.nursepro.nurse_pro_api.entity.ScheduleConflict;
@@ -61,6 +64,19 @@ public class ScheduleController {
     @Operation(summary = "Recompute conflicts and workload for a schedule")
     public ResponseEntity<ApiResponse<List<ScheduleConflict>>> validateSchedule(@PathVariable String scheduleId) {
         return ResponseEntity.ok(scheduleService.validateSchedule(scheduleId));
+    }
+
+    @PostMapping("/{scheduleId}/reschedule")
+    @Operation(summary = "Preview (default) or apply a reschedule of a date range")
+    public ResponseEntity<ApiResponse<RescheduleResult>> reschedule(
+            @PathVariable String scheduleId, @Valid @RequestBody RescheduleRequest request) {
+        return ResponseEntity.ok(scheduleService.reschedule(scheduleId, request));
+    }
+
+    @GetMapping("/{scheduleId}/changes")
+    @Operation(summary = "Audit log of changes made to a schedule")
+    public ResponseEntity<ApiResponse<List<ScheduleChange>>> getChanges(@PathVariable String scheduleId) {
+        return ResponseEntity.ok(scheduleService.getChanges(scheduleId));
     }
 
     @PutMapping("/{scheduleId}/status")

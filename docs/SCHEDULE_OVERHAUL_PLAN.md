@@ -54,10 +54,18 @@ Status: done on `feature/schedule-overhaul`. `ScheduleGenerator` replaces the da
 
 ## Phase 3: Rescheduling
 
-- `POST /schedules/{id}/reschedule` with `fromDate`, optional `toDate`, `excludeNurseIds`, `mode` (`fill_gaps` | `rebuild_range`), `lockedShiftIds`, `reason`.
-- `dryRun=true` returns a diff without saving; applying requires the schedule `version`.
-- Past dates are immutable; drafts can be regenerated; edits to published schedules are written to `ScheduleChange`.
-- Changing a nurse's `unavailableDates` or removing a nurse flags affected future shifts as conflicts (no auto-mutation). Block deleting a nurse with future assignments, or soft-delete.
+Status: backend and frontend done on `feature/schedule-overhaul`. The planning logic (`ReschedulePlanner`, `ScheduleGenerator`) is unit-tested (46 tests passing in the harness); the service wiring type-checks against stubs but has not run against a database.
+
+- [x] `POST /schedules/{id}/reschedule` with `fromDate`, `toDate`, `mode` (`fill_gaps` | `rebuild_range`), `excludeNurseIds`, `lockedShiftIds`, `reason`, optional `constraints`.
+- [x] Dry run by default: returns the diff (per shift: nurses added and removed, new shifts), totals, positions still unfilled, and the conflicts the schedule would have. Applying needs `dryRun=false` plus the `revision` and `seed` from the preview. The revision is a fingerprint of every shift's version and assignments, so a schedule that changed after the preview returns 409 and the preview must be redone.
+- [x] Past dates are never touched (the start is clamped to today). Archived schedules are rejected (409).
+- [x] Fill gaps keeps every assignment that is still valid, drops nurses who are excluded, unavailable or no longer exist, and only staffs shifts below their required staff; it never creates shifts. Rebuild range regenerates the range except locked shifts and may create missing shifts.
+- [x] Shifts of the neighbouring months (14 days either side) constrain the edges of the range, so rest and consecutive-day rules hold across month boundaries.
+- [x] Audit log: `GET /schedules/{id}/changes`. Every reschedule and every status change is recorded with actor and reason; shift edits, moves and approved swaps on a Published schedule are recorded too.
+- [x] Changing a nurse's availability re-checks the conflicts of the open schedules where they still have upcoming shifts. Deleting a nurse who still has upcoming shifts returns 409 asking to reschedule first (soft delete was not added).
+- [x] Frontend: a Reschedule dialog (range, mode, excluded nurses, reason, preview, apply) and Publish / Archive buttons with confirmation and a status badge on the schedule page.
+- [ ] Not stored: the constraints a schedule was generated with, so reschedules use the defaults unless the request supplies others.
+- [ ] Audit log viewer in the UI (`fetchScheduleChanges` exists in the store).
 
 ## Phase 4: Swaps, idempotency, duplicates
 
@@ -120,7 +128,8 @@ Status: first pass done together with Phase 5; the UI items still open are marke
 - [ ] Generator preview step and "open existing / regenerate draft" on 409.
 - [ ] Shift form: show `previewShift` results before saving.
 - [ ] Publish / archive buttons (store action exists).
-- [ ] Reschedule dialog and swap approval screen (Phases 3 and 4).
+- [x] Reschedule dialog and Publish / Archive buttons (Phase 3).
+- [ ] Swap approval screen (Phase 4).
 
 
 - Types: dates as ISO strings, `scheduleId`, real conflict shape, unified constraints.

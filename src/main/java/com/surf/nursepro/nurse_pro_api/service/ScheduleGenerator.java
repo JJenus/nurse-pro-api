@@ -60,6 +60,9 @@ public class ScheduleGenerator {
         private Collection<Shift> history = new ArrayList<>();
         private Collection<Shift> locked = new ArrayList<>();
         private Set<String> excludedNurseIds = new HashSet<>();
+        private boolean fillToMaximum = true;
+        private Set<String> onlySlotKeys;
+        private Map<String, Integer> requiredStaffBySlot = new HashMap<>();
 
         public int getYear() { return year; }
         public void setYear(int year) { this.year = year; }
@@ -85,6 +88,15 @@ public class ScheduleGenerator {
         public void setLocked(Collection<Shift> locked) { this.locked = locked; }
         public Set<String> getExcludedNurseIds() { return excludedNurseIds; }
         public void setExcludedNurseIds(Set<String> excludedNurseIds) { this.excludedNurseIds = excludedNurseIds; }
+        /** When false only the minimum staffing is filled (gap filling); default true. */
+        public boolean isFillToMaximum() { return fillToMaximum; }
+        public void setFillToMaximum(boolean fillToMaximum) { this.fillToMaximum = fillToMaximum; }
+        /** When set, only slots with these keys (see {@link #slotKey}) are created; null creates every slot. */
+        public Set<String> getOnlySlotKeys() { return onlySlotKeys; }
+        public void setOnlySlotKeys(Set<String> onlySlotKeys) { this.onlySlotKeys = onlySlotKeys; }
+        /** Per-slot minimum staffing that overrides the constraint default (key: {@link #slotKey}). */
+        public Map<String, Integer> getRequiredStaffBySlot() { return requiredStaffBySlot; }
+        public void setRequiredStaffBySlot(Map<String, Integer> requiredStaffBySlot) { this.requiredStaffBySlot = requiredStaffBySlot; }
     }
 
     public static class Result {
@@ -106,6 +118,11 @@ public class ScheduleGenerator {
         public int getUnfilledPositions() { return unfilledPositions; }
     }
 
+    /** Identifies a slot: date and shift type (there is one General shift per type per day). */
+    public static String slotKey(LocalDate date, ShiftType type) {
+        return date + "|" + type;
+    }
+
     // ------------------------------------------------------------------------------------------------------------
 
     public Result generate(Request request) {
@@ -124,7 +141,9 @@ public class ScheduleGenerator {
         buildSlots(ctx, request, start, end);
 
         fillToMinimum(ctx);
-        raiseTowardsMaximum(ctx);
+        if (request.isFillToMaximum()) {
+            raiseTowardsMaximum(ctx);
+        }
         repairShortSlots(ctx);
         balanceHours(ctx);
 
@@ -269,18 +288,24 @@ public class ScheduleGenerator {
         if (request.getLocked() != null) {
             for (Shift shift : request.getLocked()) {
                 if (shift.getDate() != null && shift.getType() != null) {
-                    lockedByKey.put(shift.getDate() + "|" + shift.getType(), shift);
+                    lockedByKey.put(slotKey(shift.getDate(), shift.getType()), shift);
                 }
             }
         }
 
         for (LocalDate date = start; !date.isAfter(end); date = date.plusDays(1)) {
             for (ShiftType type : ShiftType.values()) {
+                String key = slotKey(date, type);
+                if (request.getOnlySlotKeys() != null && !request.getOnlySlotKeys().contains(key)) {
+                    continue;
+                }
+                Integer override = request.getRequiredStaffBySlot() == null ? null : request.getRequiredStaffBySlot().get(key);
+                int min = override != null && override > 0 ? override : ctx.minNurses;
                 Slot slot = new Slot(date, type, date.atTime(defaultStart(type)), SHIFT_HOURS,
-                        ctx.minNurses, ctx.maxNurses, false);
+                        min, Math.max(ctx.maxNurses, min), false);
                 ctx.slots.add(slot);
 
-                Shift lockedShift = lockedByKey.get(date + "|" + type);
+                Shift lockedShift = lockedByKey.get(key);
                 if (lockedShift != null && lockedShift.getAssignedNurses() != null) {
                     for (String nurseId : lockedShift.getAssignedNurses()) {
                         Timeline t = ctx.byId.get(nurseId);
