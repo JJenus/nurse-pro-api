@@ -84,7 +84,7 @@ class SwapPlannerTest {
 
     @Test
     void shiftCannotBeSwappedWithItself() {
-        Shift a = shift("a", "alice", "bob");
+        Shift a = shift("a", "alice");
         assertThrows(IllegalArgumentException.class, () -> planner.plan(a, a, "alice", "bob"));
     }
 }
