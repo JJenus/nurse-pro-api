@@ -16,6 +16,7 @@ public class SwapRequest {
     private String targetId;
     private String shiftId;
     private String targetShiftId;
+    @Column(length = 1000)
     private String reason;
 
     @Enumerated(EnumType.STRING)
@@ -24,6 +25,10 @@ public class SwapRequest {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
     private String reviewedBy;
+    @Column(length = 1000)
     private String reviewNotes;
     private boolean autoMatched;
+
+    @Version
+    private Long version;
 }

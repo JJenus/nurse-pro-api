@@ -2,6 +2,10 @@ package com.surf.nursepro.nurse_pro_api.service;
 
 import com.itextpdf.text.Paragraph;
 import com.surf.nursepro.nurse_pro_api.dto.ApiResponse;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.surf.nursepro.nurse_pro_api.dto.MoveNurseRequest;
+import com.surf.nursepro.nurse_pro_api.dto.SwapRequestCreate;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationParams;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationResult;
 import com.surf.nursepro.nurse_pro_api.dto.ShiftRequest;
@@ -13,10 +17,15 @@ import com.surf.nursepro.nurse_pro_api.repository.*;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -41,6 +50,16 @@ public class ScheduleService {
     private final WorkloadDataRepository workloadDataRepository;
     private final ScheduleConflictRepository conflictRepository;
     private final ScheduleValidator scheduleValidator;
+    private final SwapPlanner swapPlanner;
+    private final IdempotencyKeyRepository idempotencyKeyRepository;
+    private final ObjectMapper objectMapper;
+
+    /** Timezone used to decide what "today" is (past shifts cannot be swapped). */
+    @Value("${app.timezone:Africa/Lagos}")
+    private String appTimezone = "Africa/Lagos";
+
+    private static final String IDEMPOTENCY_SCOPE_GENERATE = "schedule-generate";
+    private static final long IDEMPOTENCY_TTL_HOURS = 24;
 
 
     @Transactional(readOnly = true)
@@ -159,8 +178,71 @@ public class ScheduleService {
         return new ApiResponse<>(conflicts, conflicts.isEmpty() ? "No conflicts" : conflicts.size() + " conflict(s)", true);
     }
 
+    /**
+     * Generates a schedule. With an Idempotency-Key, a retry of the same request returns the schedule created by the
+     * first attempt instead of failing with "already exists"; reusing a key for a different request is rejected.
+     */
     @Transactional
-    public ApiResponse<ScheduleGenerationResult> generateSchedule(ScheduleGenerationParams params) {
+    public ApiResponse<ScheduleGenerationResult> generateSchedule(ScheduleGenerationParams params, String idempotencyKey) {
+        String key = idempotencyKey == null || idempotencyKey.isBlank() ? null : idempotencyKey.trim();
+        String requestHash = null;
+        if (key != null) {
+            if (key.length() > 128) {
+                throw new IllegalArgumentException("Idempotency-Key must be at most 128 characters");
+            }
+            requestHash = hashOf(params);
+            Optional<IdempotencyKey> stored = idempotencyKeyRepository.findByScopeAndKeyValue(IDEMPOTENCY_SCOPE_GENERATE, key);
+            if (stored.isPresent()) {
+                IdempotencyKey record = stored.get();
+                if (record.getExpiresAt() != null && record.getExpiresAt().isBefore(LocalDateTime.now())) {
+                    idempotencyKeyRepository.delete(record);
+                    idempotencyKeyRepository.flush();
+                } else {
+                    if (!Objects.equals(record.getRequestHash(), requestHash)) {
+                        throw new ConflictException("This Idempotency-Key was already used with a different request");
+                    }
+                    return replayGeneration(record);
+                }
+            }
+        }
+
+        ApiResponse<ScheduleGenerationResult> response = createSchedule(params);
+
+        if (key != null) {
+            // Stored in the same transaction as the schedule, so the key exists if and only if the schedule does.
+            IdempotencyKey record = new IdempotencyKey();
+            record.setScope(IDEMPOTENCY_SCOPE_GENERATE);
+            record.setKeyValue(key);
+            record.setRequestHash(requestHash);
+            record.setResourceId(response.getData().getSchedule().getId());
+            record.setResponseStatus(200);
+            record.setExpiresAt(LocalDateTime.now().plusHours(IDEMPOTENCY_TTL_HOURS));
+            idempotencyKeyRepository.save(record);
+        }
+        return response;
+    }
+
+    private ApiResponse<ScheduleGenerationResult> replayGeneration(IdempotencyKey record) {
+        Schedule schedule = scheduleRepository.findById(record.getResourceId())
+                .orElseThrow(() -> new ConflictException("The schedule created by this request no longer exists"));
+        schedule.getShifts().size();
+        List<ScheduleConflict> conflicts = conflictRepository.findByScheduleId(schedule.getId());
+        List<WorkloadData> stats = workloadDataRepository.findByMonthAndYear(schedule.getMonth(), schedule.getYear());
+        return new ApiResponse<>(new ScheduleGenerationResult(schedule, conflicts, stats),
+                "Schedule generated successfully (replayed)", true);
+    }
+
+    private String hashOf(Object payload) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(objectMapper.writeValueAsString(payload).getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (JsonProcessingException | NoSuchAlgorithmException e) {
+            throw new IllegalStateException("Could not fingerprint the request", e);
+        }
+    }
+
+    private ApiResponse<ScheduleGenerationResult> createSchedule(ScheduleGenerationParams params) {
         if (params == null || params.getMonth() < 1 || params.getMonth() > 12 || params.getYear() < 2000) {
             logger.warn("Invalid schedule generation parameters: {}", params);
             throw new IllegalArgumentException("Invalid month or year");
@@ -611,55 +693,292 @@ public class ScheduleService {
     }
 
     @Transactional
-    public ApiResponse<SwapRequest> createSwapRequest(SwapRequest request) {
-        if (request == null || request.getShiftId() == null || request.getRequesterId() == null) {
-            logger.warn("Invalid swap request data: {}", request);
+    public ApiResponse<SwapRequest> createSwapRequest(SwapRequestCreate dto) {
+        if (dto == null) {
             throw new IllegalArgumentException("Invalid swap request data");
         }
+        String targetShiftId = dto.getTargetShiftId() == null || dto.getTargetShiftId().isBlank()
+                ? null : dto.getTargetShiftId();
+
+        if (dto.getRequesterId().equals(dto.getTargetId())) {
+            throw new IllegalArgumentException("A nurse cannot swap a shift with themselves");
+        }
+        assertNursesExist(List.of(dto.getRequesterId(), dto.getTargetId()));
+
+        Shift a = shiftRepository.findById(dto.getShiftId())
+                .orElseThrow(() -> new IllegalArgumentException("Shift not found"));
+        Shift b = targetShiftId == null ? null : shiftRepository.findById(targetShiftId)
+                .orElseThrow(() -> new IllegalArgumentException("The offered shift was not found"));
+        assertSwappable(a);
+        if (b != null) {
+            assertSwappable(b);
+        }
+
+        if (swapRequestRepository.existsByShiftIdAndRequesterIdAndStatus(
+                dto.getShiftId(), dto.getRequesterId(), SwapRequestStatus.Pending)) {
+            throw new ConflictException("A swap request for this shift is already pending");
+        }
+
+        Map<String, Set<String>> plan = swapPlanner.plan(a, b, dto.getRequesterId(), dto.getTargetId());
+        List<String> problems = introducedConflicts(b == null ? List.of(a) : List.of(a, b), plan);
+        if (!problems.isEmpty()) {
+            throw new ConflictException("This swap would cause conflicts: " + String.join("; ", problems));
+        }
+
+        SwapRequest request = new SwapRequest();
+        request.setRequesterId(dto.getRequesterId());
+        request.setTargetId(dto.getTargetId());
+        request.setShiftId(dto.getShiftId());
+        request.setTargetShiftId(targetShiftId);
+        request.setReason(dto.getReason());
+        request.setAutoMatched(dto.isAutoMatched());
+        request.setStatus(SwapRequestStatus.Pending);
         request.setCreatedAt(LocalDateTime.now());
         request.setUpdatedAt(LocalDateTime.now());
-        request.setStatus(SwapRequestStatus.Pending);
         SwapRequest savedRequest = swapRequestRepository.save(request);
         logger.info("Created swap request ID: {}", savedRequest.getId());
         return new ApiResponse<>(savedRequest, "Swap request created successfully", true);
     }
 
+    /**
+     * Approves a pending swap and moves the nurses in the same transaction. Approving an already approved request is a
+     * no-op that returns the same result; approving a rejected or cancelled one is a 409.
+     */
     @Transactional
     public ApiResponse<SwapRequest> approveSwapRequest(String requestId, String reviewer) {
-        if (requestId == null) {
-            logger.warn("Invalid swap request ID: {}", requestId);
-            throw new IllegalArgumentException("Invalid swap request ID");
+        SwapRequest request = lockSwapRequest(requestId);
+
+        if (request.getStatus() == SwapRequestStatus.Approved) {
+            return new ApiResponse<>(request, "Swap request already approved", true);
         }
-        SwapRequest request = swapRequestRepository.findById(requestId)
-                .orElseThrow(() -> {
-                    logger.error("Swap request not found: {}", requestId);
-                    return new IllegalArgumentException("Swap request not found");
-                });
+        if (request.getStatus() != SwapRequestStatus.Pending) {
+            throw new ConflictException("Cannot approve a swap request that is " + request.getStatus());
+        }
+
+        Shift a = shiftRepository.findById(request.getShiftId())
+                .orElseThrow(() -> new ConflictException("The shift no longer exists"));
+        Shift b = request.getTargetShiftId() == null ? null : shiftRepository.findById(request.getTargetShiftId())
+                .orElseThrow(() -> new ConflictException("The offered shift no longer exists"));
+
+        Map<String, Set<String>> plan;
+        try {
+            assertSwappable(a);
+            if (b != null) {
+                assertSwappable(b);
+            }
+            // The roster may have changed since the request was made, so everything is checked again.
+            plan = swapPlanner.plan(a, b, request.getRequesterId(), request.getTargetId());
+        } catch (IllegalArgumentException e) {
+            throw new ConflictException(e.getMessage());
+        }
+        List<Shift> affected = b == null ? List.of(a) : List.of(a, b);
+        List<String> problems = introducedConflicts(affected, plan);
+        if (!problems.isEmpty()) {
+            throw new ConflictException("This swap would cause conflicts: " + String.join("; ", problems));
+        }
+
+        for (Shift shift : affected) {
+            shift.getAssignedNurses().clear();
+            shift.getAssignedNurses().addAll(plan.get(shift.getId()));
+        }
+        shiftRepository.saveAll(affected);
+
         request.setStatus(SwapRequestStatus.Approved);
         request.setUpdatedAt(LocalDateTime.now());
         request.setReviewedBy(reviewer);
         SwapRequest savedRequest = swapRequestRepository.save(request);
+
+        // Other open requests that involve these shifts are now based on stale assignments.
+        Set<String> shiftIds = new HashSet<>();
+        affected.forEach(sh -> shiftIds.add(sh.getId()));
+        for (SwapRequest other : swapRequestRepository.findOpenForShifts(SwapRequestStatus.Pending, shiftIds)) {
+            if (!other.getId().equals(savedRequest.getId())) {
+                other.setStatus(SwapRequestStatus.Cancelled);
+                other.setUpdatedAt(LocalDateTime.now());
+                other.setReviewNotes("Superseded: the shift assignments changed (swap request " + savedRequest.getId() + " was approved)");
+                swapRequestRepository.save(other);
+            }
+        }
+
+        refreshDerivedDataFor(affected);
         logger.info("Approved swap request ID: {}", savedRequest.getId());
         return new ApiResponse<>(savedRequest, "Swap request approved", true);
     }
 
     @Transactional
     public ApiResponse<SwapRequest> rejectSwapRequest(String requestId, String reviewer) {
-        if (requestId == null) {
-            logger.warn("Invalid swap request ID: {}", requestId);
-            throw new IllegalArgumentException("Invalid swap request ID");
+        SwapRequest request = lockSwapRequest(requestId);
+        if (request.getStatus() == SwapRequestStatus.Rejected) {
+            return new ApiResponse<>(request, "Swap request already rejected", true);
         }
-        SwapRequest request = swapRequestRepository.findById(requestId)
-                .orElseThrow(() -> {
-                    logger.error("Swap request not found: {}", requestId);
-                    return new IllegalArgumentException("Swap request not found");
-                });
+        if (request.getStatus() != SwapRequestStatus.Pending) {
+            throw new ConflictException("Cannot reject a swap request that is " + request.getStatus());
+        }
         request.setStatus(SwapRequestStatus.Rejected);
         request.setUpdatedAt(LocalDateTime.now());
         request.setReviewedBy(reviewer);
         SwapRequest savedRequest = swapRequestRepository.save(request);
         logger.info("Rejected swap request ID: {}", savedRequest.getId());
         return new ApiResponse<>(savedRequest, "Swap request rejected", true);
+    }
+
+    @Transactional
+    public ApiResponse<SwapRequest> cancelSwapRequest(String requestId) {
+        SwapRequest request = lockSwapRequest(requestId);
+        if (request.getStatus() == SwapRequestStatus.Cancelled) {
+            return new ApiResponse<>(request, "Swap request already cancelled", true);
+        }
+        if (request.getStatus() != SwapRequestStatus.Pending) {
+            throw new ConflictException("Cannot cancel a swap request that is " + request.getStatus());
+        }
+        request.setStatus(SwapRequestStatus.Cancelled);
+        request.setUpdatedAt(LocalDateTime.now());
+        SwapRequest savedRequest = swapRequestRepository.save(request);
+        logger.info("Cancelled swap request ID: {}", savedRequest.getId());
+        return new ApiResponse<>(savedRequest, "Swap request cancelled", true);
+    }
+
+    /**
+     * Moves a nurse from one shift to another (or adds/removes them) in a single transaction, so a failure can never
+     * leave the nurse removed from the source but not added to the target. Repeating a completed move is a no-op.
+     * Conflicts the move causes are reported through the refreshed conflict list rather than blocking the manager.
+     */
+    @Transactional
+    public ApiResponse<List<Shift>> moveNurse(MoveNurseRequest request) {
+        String nurseId = request.getNurseId();
+        assertNursesExist(List.of(nurseId));
+
+        Shift from = blankToNull(request.getFromShiftId()) == null ? null
+                : shiftRepository.findById(request.getFromShiftId())
+                        .orElseThrow(() -> new IllegalArgumentException("Source shift not found"));
+        Shift to = blankToNull(request.getToShiftId()) == null ? null
+                : shiftRepository.findById(request.getToShiftId())
+                        .orElseThrow(() -> new IllegalArgumentException("Destination shift not found"));
+
+        boolean removedAlready = from == null || !from.getAssignedNurses().contains(nurseId);
+        boolean addedAlready = to == null || to.getAssignedNurses().contains(nurseId);
+        if (removedAlready && addedAlready) {
+            List<Shift> unchanged = new ArrayList<>();
+            if (from != null) unchanged.add(from);
+            if (to != null) unchanged.add(to);
+            return new ApiResponse<>(unchanged, "Assignment already up to date", true);
+        }
+        if (from != null && removedAlready) {
+            throw new ConflictException("The nurse is not assigned to the source shift");
+        }
+
+        List<Shift> changed = new ArrayList<>();
+        if (from != null) {
+            assertEditable(from.getSchedule());
+            from.getAssignedNurses().remove(nurseId);
+            changed.add(from);
+        }
+        if (to != null && !addedAlready) {
+            assertEditable(to.getSchedule());
+            to.getAssignedNurses().add(nurseId);
+            changed.add(to);
+        }
+        shiftRepository.saveAll(changed);
+        refreshDerivedDataFor(changed);
+        return new ApiResponse<>(changed, "Nurse moved successfully", true);
+    }
+
+    private SwapRequest lockSwapRequest(String requestId) {
+        if (requestId == null || requestId.isBlank()) {
+            throw new IllegalArgumentException("Invalid swap request ID");
+        }
+        return swapRequestRepository.findByIdForUpdate(requestId)
+                .orElseThrow(() -> {
+                    logger.error("Swap request not found: {}", requestId);
+                    return new IllegalArgumentException("Swap request not found");
+                });
+    }
+
+    private LocalDate today() {
+        return LocalDate.now(ZoneId.of(appTimezone));
+    }
+
+    private void assertSwappable(Shift shift) {
+        if (shift.getSchedule() == null) {
+            throw new IllegalArgumentException("The shift is not part of a schedule");
+        }
+        if (shift.getSchedule().getStatus() == ScheduleStatus.Archived) {
+            throw new IllegalArgumentException("The schedule is archived");
+        }
+        if (shift.getDate().isBefore(today())) {
+            throw new IllegalArgumentException("Past shifts cannot be swapped");
+        }
+    }
+
+    private String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    private void refreshDerivedDataFor(Collection<Shift> shifts) {
+        Map<String, Schedule> schedules = new LinkedHashMap<>();
+        for (Shift shift : shifts) {
+            if (shift.getSchedule() != null) {
+                schedules.putIfAbsent(shift.getSchedule().getId(), shift.getSchedule());
+            }
+        }
+        schedules.values().forEach(this::refreshDerivedData);
+    }
+
+    /**
+     * Conflicts that would exist after applying {@code newAssignments} but do not exist now, as readable messages.
+     * Works on transient copies of the affected shifts so nothing managed is modified (and nothing is flushed).
+     */
+    private List<String> introducedConflicts(List<Shift> affected, Map<String, Set<String>> newAssignments) {
+        Map<String, Schedule> schedules = new LinkedHashMap<>();
+        for (Shift shift : affected) {
+            if (shift.getSchedule() == null) {
+                throw new IllegalArgumentException("The shift is not part of a schedule");
+            }
+            schedules.putIfAbsent(shift.getSchedule().getId(), shift.getSchedule());
+        }
+
+        List<String> messages = new ArrayList<>();
+        for (Schedule schedule : schedules.values()) {
+            List<Shift> current = new ArrayList<>(schedule.getShifts());
+            List<Shift> proposed = new ArrayList<>();
+            for (Shift shift : current) {
+                Set<String> replacement = newAssignments.get(shift.getId());
+                proposed.add(replacement == null ? shift : copyWithAssignments(shift, replacement));
+            }
+
+            Set<String> nurseIds = new HashSet<>();
+            current.forEach(sh -> nurseIds.addAll(sh.getAssignedNurses()));
+            proposed.forEach(sh -> nurseIds.addAll(sh.getAssignedNurses()));
+            Map<String, Nurse> nurses = loadNurses(nurseIds);
+
+            Set<String> before = new HashSet<>();
+            for (ScheduleConflict c : scheduleValidator.validate(schedule.getId(), current, nurses)) {
+                before.add(conflictKey(c));
+            }
+            for (ScheduleConflict c : scheduleValidator.validate(schedule.getId(), proposed, nurses)) {
+                if (!before.contains(conflictKey(c))) {
+                    messages.add(c.getMessage());
+                }
+            }
+        }
+        return messages;
+    }
+
+    private String conflictKey(ScheduleConflict c) {
+        return c.getType() + "|" + c.getShiftId() + "|" + c.getNurseId();
+    }
+
+    private Shift copyWithAssignments(Shift source, Set<String> assignments) {
+        Shift copy = new Shift();
+        copy.setId(source.getId());
+        copy.setDate(source.getDate());
+        copy.setStartTime(source.getStartTime());
+        copy.setEndTime(source.getEndTime());
+        copy.setType(source.getType());
+        copy.setDepartment(source.getDepartment());
+        copy.setRequiredStaff(source.getRequiredStaff());
+        copy.setAssignedNurses(new LinkedHashSet<>(assignments));
+        return copy;
     }
 
     @Transactional(readOnly = true)

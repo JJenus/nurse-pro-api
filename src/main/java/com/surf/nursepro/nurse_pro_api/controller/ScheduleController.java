@@ -5,7 +5,9 @@ import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationParams;
 import com.surf.nursepro.nurse_pro_api.entity.Schedule;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationResult;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleStatusRequest;
+import com.surf.nursepro.nurse_pro_api.dto.MoveNurseRequest;
 import com.surf.nursepro.nurse_pro_api.dto.ShiftRequest;
+import com.surf.nursepro.nurse_pro_api.dto.SwapRequestCreate;
 import com.surf.nursepro.nurse_pro_api.entity.ScheduleConflict;
 import com.surf.nursepro.nurse_pro_api.enums.ScheduleStatus;
 import com.surf.nursepro.nurse_pro_api.enums.SwapRequestStatus;
@@ -70,8 +72,16 @@ public class ScheduleController {
 
     @PostMapping("/generate")
     @Operation(summary = "Generate new schedule")
-    public ResponseEntity<ApiResponse<ScheduleGenerationResult>> generateSchedule(@Valid @RequestBody ScheduleGenerationParams params) {
-        return ResponseEntity.ok(scheduleService.generateSchedule(params));
+    public ResponseEntity<ApiResponse<ScheduleGenerationResult>> generateSchedule(
+            @Valid @RequestBody ScheduleGenerationParams params,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        return ResponseEntity.ok(scheduleService.generateSchedule(params, idempotencyKey));
+    }
+
+    @PostMapping("/shifts/move")
+    @Operation(summary = "Move a nurse between shifts atomically")
+    public ResponseEntity<ApiResponse<List<Shift>>> moveNurse(@Valid @RequestBody MoveNurseRequest request) {
+        return ResponseEntity.ok(scheduleService.moveNurse(request));
     }
 
     @PostMapping("/shifts/validate")
@@ -101,7 +111,7 @@ public class ScheduleController {
 
     @PostMapping("/swap-requests")
     @Operation(summary = "Create swap request")
-    public ResponseEntity<ApiResponse<SwapRequest>> createSwapRequest(@Valid @RequestBody SwapRequest request) {
+    public ResponseEntity<ApiResponse<SwapRequest>> createSwapRequest(@Valid @RequestBody SwapRequestCreate request) {
         return ResponseEntity.ok(scheduleService.createSwapRequest(request));
     }
 
@@ -116,6 +126,12 @@ public class ScheduleController {
     @Operation(summary = "Approve swap request")
     public ResponseEntity<ApiResponse<SwapRequest>> approveSwapRequest(@PathVariable String requestId, Authentication authentication) {
         return ResponseEntity.ok(scheduleService.approveSwapRequest(requestId, reviewer(authentication)));
+    }
+
+    @PutMapping("/swap-requests/{requestId}/cancel")
+    @Operation(summary = "Cancel a pending swap request")
+    public ResponseEntity<ApiResponse<SwapRequest>> cancelSwapRequest(@PathVariable String requestId) {
+        return ResponseEntity.ok(scheduleService.cancelSwapRequest(requestId));
     }
 
     @PutMapping("/swap-requests/{requestId}/reject")
