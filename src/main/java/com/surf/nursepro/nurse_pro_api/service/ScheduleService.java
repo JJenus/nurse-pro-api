@@ -167,7 +167,7 @@ public class ScheduleService {
         others.forEach(sh -> nurseIds.addAll(sh.getAssignedNurses()));
         nurseIds.addAll(candidate.getAssignedNurses());
         List<ScheduleConflict> conflicts = scheduleValidator.validateCandidate(
-                schedule.getId(), candidate, shiftId, others, loadNurses(nurseIds));
+                schedule.getId(), candidate, shiftId, others, loadNurses(nurseIds), rulesOf(schedule));
 
         boolean slotTaken = others.stream().anyMatch(sh -> sh.getDate().equals(request.getDate())
                 && sh.getType() == request.getType()
@@ -257,9 +257,16 @@ public class ScheduleService {
             throw new IllegalArgumentException("Invalid month or year");
         }
 
-        if (scheduleRepository.existsByMonthAndYear(params.getMonth(), params.getYear())) {
-            logger.warn("Schedule already exists for month {} and year {}", params.getMonth(), params.getYear());
-            throw new ConflictException("Schedule already exists for month " + params.getMonth() + " and year " + params.getYear());
+        Optional<Schedule> existingSchedule = scheduleRepository.findByMonthAndYear(params.getMonth(), params.getYear());
+        if (existingSchedule.isPresent()) {
+            if (params.isReplaceDraft() && existingSchedule.get().getStatus() == ScheduleStatus.Draft) {
+                discardSchedule(existingSchedule.get());
+            } else {
+                logger.warn("Schedule already exists for month {} and year {}", params.getMonth(), params.getYear());
+                throw new ConflictException("Schedule already exists for month " + params.getMonth() + " and year "
+                        + params.getYear() + (existingSchedule.get().getStatus() == ScheduleStatus.Draft
+                        ? " (it is a draft: choose to replace it to generate again)" : ""));
+            }
         }
 
         ScheduleGenerationParams.Constraints constraints = params.effectiveConstraints();
@@ -294,6 +301,7 @@ public class ScheduleService {
         schedule.setYear(params.getYear());
         schedule.setGeneratedAt(LocalDateTime.now());
         schedule.setStatus(ScheduleStatus.Draft);
+        schedule.setRulesJson(writeRules(constraints));
         List<Shift> shifts = generated.getShifts();
         shifts.forEach(sh -> sh.setSchedule(schedule));
         schedule.setShifts(shifts);
@@ -385,7 +393,7 @@ public class ScheduleService {
         Set<String> nurseIds = new HashSet<>();
         schedule.getShifts().forEach(sh -> nurseIds.addAll(sh.getAssignedNurses()));
         List<ScheduleConflict> conflicts = scheduleValidator.validate(
-                schedule.getId(), schedule.getShifts(), loadNurses(nurseIds));
+                schedule.getId(), schedule.getShifts(), loadNurses(nurseIds), rulesOf(schedule));
 
         conflictRepository.saveAll(conflicts);
         logger.debug("Detected {} conflicts for schedule {}", conflicts.size(), schedule.getId());
@@ -551,8 +559,7 @@ public class ScheduleService {
         input.setMode(request.getMode() != null ? request.getMode() : RescheduleMode.FILL_GAPS);
         input.setExcludedNurseIds(excluded);
         input.setLockedShiftIds(request.getLockedShiftIds() == null ? new HashSet<>() : request.getLockedShiftIds());
-        input.setConstraints(request.getConstraints() != null ? request.getConstraints()
-                : new ScheduleGenerationParams.Constraints());
+        input.setConstraints(request.getConstraints() != null ? request.getConstraints() : rulesOf(schedule));
         input.setSeed(request.getSeed());
 
         ReschedulePlanner.Plan plan = reschedulePlanner.plan(input);
@@ -678,6 +685,44 @@ public class ScheduleService {
 
     private String describe(Shift shift) {
         return shift.getDate() + " " + shift.getType() + " " + shift.getAssignedNurses();
+    }
+
+    private String writeRules(ScheduleGenerationParams.Constraints constraints) {
+        try {
+            return objectMapper.writeValueAsString(constraints);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not store the schedule rules", e);
+        }
+    }
+
+    /** The rules a schedule is checked against: the ones it was generated with, or the defaults. */
+    private ScheduleGenerationParams.Constraints rulesOf(Schedule schedule) {
+        if (schedule.getRulesJson() != null && !schedule.getRulesJson().isBlank()) {
+            try {
+                return objectMapper.readValue(schedule.getRulesJson(), ScheduleGenerationParams.Constraints.class);
+            } catch (JsonProcessingException e) {
+                logger.warn("Stored rules of schedule {} could not be read; using defaults", schedule.getId());
+            }
+        }
+        return new ScheduleGenerationParams.Constraints();
+    }
+
+    /** Removes a draft schedule so a new one can take its month: its conflicts go, and pending swaps on its shifts are cancelled. */
+    private void discardSchedule(Schedule schedule) {
+        Set<String> shiftIds = new HashSet<>();
+        schedule.getShifts().forEach(sh -> shiftIds.add(sh.getId()));
+        if (!shiftIds.isEmpty()) {
+            for (SwapRequest open : swapRequestRepository.findOpenForShifts(SwapRequestStatus.Pending, shiftIds)) {
+                open.setStatus(SwapRequestStatus.Cancelled);
+                open.setUpdatedAt(LocalDateTime.now());
+                open.setReviewNotes("Cancelled: the draft schedule was replaced");
+                swapRequestRepository.save(open);
+            }
+        }
+        conflictRepository.deleteByScheduleId(schedule.getId());
+        recordChange(schedule, "SCHEDULE_REPLACED", null, null, null, "Draft " + schedule.getMonth() + "/" + schedule.getYear() + " replaced by a new generation");
+        scheduleRepository.delete(schedule);
+        scheduleRepository.flush();   // free the (year, month) unique key before the new schedule is inserted
     }
 
     /** Conflicts and workload are derived from the shifts, so they are refreshed whenever the shifts change. */
@@ -1019,10 +1064,10 @@ public class ScheduleService {
             Map<String, Nurse> nurses = loadNurses(nurseIds);
 
             Set<String> before = new HashSet<>();
-            for (ScheduleConflict c : scheduleValidator.validate(schedule.getId(), current, nurses)) {
+            for (ScheduleConflict c : scheduleValidator.validate(schedule.getId(), current, nurses, rulesOf(schedule))) {
                 before.add(conflictKey(c));
             }
-            for (ScheduleConflict c : scheduleValidator.validate(schedule.getId(), proposed, nurses)) {
+            for (ScheduleConflict c : scheduleValidator.validate(schedule.getId(), proposed, nurses, rulesOf(schedule))) {
                 if (!before.contains(conflictKey(c))) {
                     messages.add(c.getMessage());
                 }

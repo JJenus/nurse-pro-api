@@ -1,8 +1,10 @@
 package com.surf.nursepro.nurse_pro_api.util;
 
 import com.surf.nursepro.nurse_pro_api.entity.Shift;
+import com.surf.nursepro.nurse_pro_api.enums.ShiftType;
 
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeParseException;
 
@@ -42,5 +44,24 @@ public final class ShiftTimes {
         } catch (DateTimeParseException e) {
             return false;
         }
+    }
+
+    /** Start of the shift; when the time is missing or unparseable the standard start of its type is used. */
+    public static LocalDateTime startOf(Shift shift) {
+        LocalTime fallback = shift.getType() == ShiftType.Evening ? LocalTime.of(15, 0)
+                : shift.getType() == ShiftType.Night ? LocalTime.of(23, 0) : LocalTime.of(7, 0);
+        LocalTime time = fallback;
+        try {
+            if (shift.getStartTime() != null) {
+                time = LocalTime.parse(shift.getStartTime());
+            }
+        } catch (DateTimeParseException e) {
+            time = fallback;
+        }
+        return shift.getDate().atTime(time);
+    }
+
+    public static LocalDateTime endOf(Shift shift) {
+        return startOf(shift).plusMinutes(Math.round(hours(shift) * 60));
     }
 }

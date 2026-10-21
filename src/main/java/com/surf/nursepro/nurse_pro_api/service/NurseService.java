@@ -5,6 +5,8 @@ import com.surf.nursepro.nurse_pro_api.dto.NurseStatus;
 import com.surf.nursepro.nurse_pro_api.entity.Nurse;
 import com.surf.nursepro.nurse_pro_api.enums.ExperienceLevel;
 import com.surf.nursepro.nurse_pro_api.exception.ConflictException;
+import com.surf.nursepro.nurse_pro_api.util.ShiftTimes;
+import org.springframework.beans.factory.annotation.Value;
 import com.surf.nursepro.nurse_pro_api.repository.NurseRepository;
 import com.surf.nursepro.nurse_pro_api.repository.ShiftRepository;
 import jakarta.persistence.criteria.Predicate;
@@ -14,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -24,6 +27,9 @@ public class NurseService {
     private final NurseRepository nurseRepository;
     private final ShiftRepository shiftRepository;
     private final ScheduleService scheduleService;
+
+    @Value("${app.timezone:Africa/Lagos}")
+    private String appTimezone = "Africa/Lagos";
 
     @Transactional
     public ApiResponse<Nurse> createNurse(Nurse nurse) {
@@ -119,26 +125,21 @@ public class NurseService {
 
     @Transactional(readOnly = true)
     public ApiResponse<NurseStatus> getNurseStatus(String nurseId) {
-        LocalDateTime now = LocalDateTime.now();
+        // Shift times are local wall-clock times, so compare against local time, not the server's timezone.
+        LocalDateTime now = LocalDateTime.now(ZoneId.of(appTimezone));
         NurseStatus status = new NurseStatus();
         status.setNurseId(nurseId);
 
-        shiftRepository.findAll().stream()
-                .filter(shift -> shift.getAssignedNurses().contains(nurseId))
-                .filter(shift -> {
-                    LocalDateTime shiftStart = shift.getDate().atTime(
-                            LocalTime.parse(shift.getStartTime()));
-                    LocalDateTime shiftEnd = shift.getDate().atTime(
-                            LocalTime.parse(shift.getEndTime()));
-                    return now.isAfter(shiftStart) && now.isBefore(shiftEnd);
-                })
+        // Only yesterday's and today's shifts can be running now (a night shift started yesterday evening).
+        shiftRepository.findForNurseBetween(nurseId, now.toLocalDate().minusDays(1), now.toLocalDate()).stream()
+                .filter(shift -> !now.isBefore(ShiftTimes.startOf(shift)) && now.isBefore(ShiftTimes.endOf(shift)))
                 .findFirst()
                 .ifPresentOrElse(
                         shift -> {
                             status.setOnDuty(true);
                             status.setCurrentShiftId(shift.getId());
-                            status.setShiftStartTime(shift.getDate().atTime(LocalTime.parse(shift.getStartTime())));
-                            status.setShiftEndTime(shift.getDate().atTime(LocalTime.parse(shift.getEndTime())));
+                            status.setShiftStartTime(ShiftTimes.startOf(shift));
+                            status.setShiftEndTime(ShiftTimes.endOf(shift));
                         },
                         () -> status.setOnDuty(false)
                 );

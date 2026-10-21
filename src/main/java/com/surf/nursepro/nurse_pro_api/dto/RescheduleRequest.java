@@ -30,9 +30,9 @@ public class RescheduleRequest {
     /** Shifts to leave untouched when rebuilding the range. */
     private Set<String> lockedShiftIds = new HashSet<>();
 
-    /** Rules to respect (rest hours, consecutive days, weekly cap...). The generation settings are not stored, so defaults apply. */
+    /** Rules to respect. When omitted, the rules the schedule was generated with are used. */
     @Valid
-    private ScheduleGenerationParams.Constraints constraints = new ScheduleGenerationParams.Constraints();
+    private ScheduleGenerationParams.Constraints constraints;
 
     @Size(max = 1000, message = "reason must be at most 1000 characters")
     private String reason;

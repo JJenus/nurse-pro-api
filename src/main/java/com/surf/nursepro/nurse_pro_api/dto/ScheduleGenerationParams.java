@@ -33,6 +33,9 @@ public class ScheduleGenerationParams {
     /** Optional seed so a generation can be reproduced (used by the Phase 2 generator). */
     private Long seed;
 
+    /** When a Draft schedule already exists for the month, replace it instead of failing with 409. */
+    private boolean replaceDraft;
+
     @JsonIgnore
     public Constraints effectiveConstraints() {
         return constraints != null ? constraints : new Constraints();

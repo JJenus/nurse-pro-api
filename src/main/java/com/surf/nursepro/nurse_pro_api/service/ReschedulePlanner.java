@@ -196,7 +196,7 @@ public class ReschedulePlanner {
             copy.setId("new-" + (counter++));
             proposedSchedule.add(copy);
         }
-        result.setConflicts(validator.validate(in.getScheduleId(), proposedSchedule, nurseById));
+        result.setConflicts(validator.validate(in.getScheduleId(), proposedSchedule, nurseById, in.getConstraints()));
 
         return new Plan(result, newShifts);
     }

@@ -1,14 +1,19 @@
 package com.surf.nursepro.nurse_pro_api.service;
 
+import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationParams;
 import com.surf.nursepro.nurse_pro_api.entity.Nurse;
 import com.surf.nursepro.nurse_pro_api.entity.ScheduleConflict;
 import com.surf.nursepro.nurse_pro_api.entity.Shift;
 import com.surf.nursepro.nurse_pro_api.enums.ScheduleConflictSeverity;
 import com.surf.nursepro.nurse_pro_api.enums.ScheduleConflictType;
+import com.surf.nursepro.nurse_pro_api.enums.ShiftType;
 import com.surf.nursepro.nurse_pro_api.util.ShiftTimes;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.temporal.IsoFields;
 import java.util.*;
 
 /**
@@ -24,6 +29,12 @@ public class ScheduleValidator {
     public static final String CANDIDATE_ID = "__candidate__";
 
     public List<ScheduleConflict> validate(String scheduleId, Collection<Shift> shifts, Map<String, Nurse> nurses) {
+        return validate(scheduleId, shifts, nurses, new ScheduleGenerationParams.Constraints());
+    }
+
+    /** Same as above, checked against the given rules (rest hours, consecutive days, weekly hours). */
+    public List<ScheduleConflict> validate(String scheduleId, Collection<Shift> shifts, Map<String, Nurse> nurses,
+                                           ScheduleGenerationParams.Constraints rules) {
         List<ScheduleConflict> conflicts = new ArrayList<>();
 
         // nurse -> shifts per start date, used to spot a nurse booked twice on the same day
@@ -63,6 +74,7 @@ public class ScheduleValidator {
                 }
             }
         }
+        checkWorkPatterns(scheduleId, shifts, nurses, rules != null ? rules : new ScheduleGenerationParams.Constraints(), conflicts);
         return conflicts;
     }
 
@@ -72,19 +84,119 @@ public class ScheduleValidator {
      * {@code realShiftId} (null for a new shift).
      */
     public List<ScheduleConflict> validateCandidate(String scheduleId, Shift candidate, String realShiftId,
-                                                    Collection<Shift> otherShifts, Map<String, Nurse> nurses) {
+                                                    Collection<Shift> otherShifts, Map<String, Nurse> nurses,
+                                                    ScheduleGenerationParams.Constraints rules) {
         candidate.setId(CANDIDATE_ID);
         List<Shift> all = new ArrayList<>(otherShifts);
         all.add(candidate);
 
         List<ScheduleConflict> result = new ArrayList<>();
-        for (ScheduleConflict c : validate(scheduleId, all, nurses)) {
+        for (ScheduleConflict c : validate(scheduleId, all, nurses, rules)) {
             if (CANDIDATE_ID.equals(c.getShiftId())) {
                 c.setShiftId(realShiftId);
                 result.add(c);
             }
         }
         return result;
+    }
+
+    /** Rest between shifts, consecutive working days and weekly hours, per nurse. */
+    private void checkWorkPatterns(String scheduleId, Collection<Shift> shifts, Map<String, Nurse> nurses,
+                                   ScheduleGenerationParams.Constraints rules, List<ScheduleConflict> out) {
+        Map<String, List<Shift>> byNurse = new LinkedHashMap<>();
+        for (Shift shift : shifts) {
+            if (shift.getDate() == null) {
+                continue;
+            }
+            for (String nurseId : assigned(shift)) {
+                if (nurses.containsKey(nurseId)) {
+                    byNurse.computeIfAbsent(nurseId, k -> new ArrayList<>()).add(shift);
+                }
+            }
+        }
+
+        for (Map.Entry<String, List<Shift>> entry : byNurse.entrySet()) {
+            Nurse nurse = nurses.get(entry.getKey());
+            List<Shift> sorted = new ArrayList<>(entry.getValue());
+            sorted.sort(Comparator.comparing(ShiftTimes::startOf));
+
+            // 1. rest between consecutive shifts (two shifts on the same day are reported as an overlap instead)
+            Shift previous = null;
+            for (Shift shift : sorted) {
+                if (previous != null && !previous.getDate().equals(shift.getDate())) {
+                    LocalDateTime previousEnd = ShiftTimes.endOf(previous);
+                    double gap = Duration.between(previousEnd, ShiftTimes.startOf(shift)).toMinutes() / 60.0;
+                    if (gap < rules.getMinRestHours()) {
+                        out.add(conflict(scheduleId, shift, nurse.getId(), ScheduleConflictType.rest,
+                                ScheduleConflictSeverity.high,
+                                String.format("%s has only %s of rest before this shift (minimum %dh)",
+                                        name(nurse), formatHours(gap), rules.getMinRestHours()),
+                                "Assign another nurse", "Move the shift to a later type"));
+                    }
+                }
+                previous = shift;
+            }
+
+            // 2. consecutive working days, and consecutive day-type / night-type shifts
+            Map<LocalDate, Shift> byDate = new TreeMap<>();
+            for (Shift shift : sorted) {
+                byDate.putIfAbsent(shift.getDate(), shift);
+            }
+            LocalDate lastDate = null;
+            int run = 0;
+            int groupRun = 0;
+            boolean lastNight = false;
+            for (Map.Entry<LocalDate, Shift> day : byDate.entrySet()) {
+                boolean night = day.getValue().getType() == ShiftType.Night;
+                boolean consecutive = lastDate != null && lastDate.plusDays(1).equals(day.getKey());
+                run = consecutive ? run + 1 : 1;
+                groupRun = consecutive && night == lastNight ? groupRun + 1 : 1;
+                lastDate = day.getKey();
+                lastNight = night;
+
+                int groupLimit = night ? rules.getMaxConsecutiveNight() : rules.getMaxConsecutiveDay();
+                // reported once per run, on the first shift that goes over the limit
+                if (run == rules.getMaxConsecutiveShifts() + 1) {
+                    out.add(conflict(scheduleId, day.getValue(), nurse.getId(), ScheduleConflictType.consecutive,
+                            ScheduleConflictSeverity.medium,
+                            String.format("%s works more than %d days in a row", name(nurse), rules.getMaxConsecutiveShifts()),
+                            "Give the nurse a day off"));
+                } else if (groupRun == groupLimit + 1) {
+                    out.add(conflict(scheduleId, day.getValue(), nurse.getId(), ScheduleConflictType.consecutive,
+                            ScheduleConflictSeverity.medium,
+                            String.format("%s works more than %d %s shifts in a row", name(nurse), groupLimit,
+                                    night ? "night" : "day"),
+                            "Rotate the nurse to a different shift type"));
+                }
+            }
+
+            // 3. weekly hours (ISO weeks, attributed to the shift's start date)
+            int cap = nurse.getMaxHoursPerWeek();
+            if (cap > 0) {
+                Map<Integer, Double> weekHours = new LinkedHashMap<>();
+                Map<Integer, Shift> weekLast = new HashMap<>();
+                for (Shift shift : sorted) {
+                    int week = shift.getDate().get(IsoFields.WEEK_BASED_YEAR) * 100
+                            + shift.getDate().get(IsoFields.WEEK_OF_WEEK_BASED_YEAR);
+                    weekHours.merge(week, ShiftTimes.hours(shift), Double::sum);
+                    weekLast.put(week, shift);
+                }
+                double limit = cap + rules.getMaxOvertimeHours();
+                for (Map.Entry<Integer, Double> week : weekHours.entrySet()) {
+                    if (week.getValue() > limit + 1e-9) {
+                        out.add(conflict(scheduleId, weekLast.get(week.getKey()), nurse.getId(),
+                                ScheduleConflictType.overtime, ScheduleConflictSeverity.medium,
+                                String.format("%s is scheduled for %s in one week (limit %s)",
+                                        name(nurse), formatHours(week.getValue()), formatHours(limit)),
+                                "Move a shift to another nurse"));
+                    }
+                }
+            }
+        }
+    }
+
+    private String formatHours(double hours) {
+        return hours == Math.rint(hours) ? ((long) hours) + "h" : String.format("%.1fh", hours);
     }
 
     private void checkStaffing(String scheduleId, Shift shift, List<ScheduleConflict> out) {

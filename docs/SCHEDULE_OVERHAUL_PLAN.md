@@ -64,7 +64,7 @@ Status: backend and frontend done on `feature/schedule-overhaul`. The planning l
 - [x] Audit log: `GET /schedules/{id}/changes`. Every reschedule and every status change is recorded with actor and reason; shift edits, moves and approved swaps on a Published schedule are recorded too.
 - [x] Changing a nurse's availability re-checks the conflicts of the open schedules where they still have upcoming shifts. Deleting a nurse who still has upcoming shifts returns 409 asking to reschedule first (soft delete was not added).
 - [x] Frontend: a Reschedule dialog (range, mode, excluded nurses, reason, preview, apply) and Publish / Archive buttons with confirmation and a status badge on the schedule page.
-- [ ] Not stored: the constraints a schedule was generated with, so reschedules use the defaults unless the request supplies others.
+- [x] The constraints a schedule was generated with are stored on it (V5), so conflict checks, previews, swaps and reschedules use the same rules; a reschedule request may override them.
 - [ ] Audit log viewer in the UI (`fetchScheduleChanges` exists in the store).
 
 ## Phase 4: Swaps, idempotency, duplicates
@@ -125,7 +125,8 @@ Status: first pass done together with Phase 5; the UI items still open are marke
 - [x] Generator shows the server's message on 409 (schedule already exists).
 - [x] Schedule editor uses server conflicts instead of its local mock.
 - [x] Export fallback filename uses `.xlsx` for Excel.
-- [ ] Generator preview step and "open existing / regenerate draft" on 409.
+- [x] "Replace the existing draft" option on the generator (atomic: the old draft goes and the new one is created in one transaction; published and archived schedules are never replaced).
+- [ ] Generator preview step (generate-as-preview before saving).
 - [ ] Shift form: show `previewShift` results before saving.
 - [ ] Publish / archive buttons (store action exists).
 - [x] Reschedule dialog and Publish / Archive buttons (Phase 3).
@@ -141,18 +142,27 @@ Status: first pass done together with Phase 5; the UI items still open are marke
 
 ## Phase 7: Edge cases
 
-- Calendar: February and leap years, 28 to 31 day months, nights ending after midnight.
-- Continuity across month and week boundaries.
-- Staffing: fewer nurses than required, all nurses unavailable, `requiredStaff` of 0 or above roster size, nurses added or removed mid-month.
-- Data hygiene: null `unavailableDates`/`preferredShifts`, dangling nurse IDs, shift dates outside the schedule month, bad time formats.
-- Swaps across schedules or months; double-booking after a swap.
+Status: done where it can be done without a running database; covered by unit tests unless noted.
+
+- [x] Calendar: February and leap years, 28 to 31 day months, nights that end after midnight (generator, validator and workload hours all use real start/end times).
+- [x] Continuity across month and week boundaries (previous and next month's shifts constrain generation and reschedules; weekly hours use ISO weeks).
+- [x] Staffing: fewer nurses than required, all nurses unavailable, a nurse unavailable all month, required staff of 0 or above the roster size: never an exception; short shifts are reported as conflicts.
+- [x] Data hygiene: null `unavailableDates` / `preferredShifts`, nurse ids that no longer exist (flagged), shift dates outside the schedule month (400), bad time formats (400), duplicate shifts and duplicate nurses in a shift (blocked by the database and the API).
+- [x] Validator now enforces the work-pattern rules as well, with the schedule's own settings: minimum rest between shifts (`rest`), consecutive working days and consecutive day/night shifts (`consecutive`), weekly hours with the overtime allowance (`overtime`). Manual edits, moves and swaps are checked against the same rules as generation.
+- [x] Swaps across schedules or months and double-booking after a swap are checked (only conflicts a swap would newly introduce block it).
+- [x] Nurse deletion with upcoming shifts is blocked (409); availability changes re-check open schedules.
+- [x] Nurse on-duty status: handled night shifts that cross midnight, uses local time instead of the server's timezone (`app.timezone`, default `Africa/Lagos`), and no longer loads every shift.
+- [x] Unavailable dates: the nurse form now has an editor (there was none, so the availability rules could never be exercised from the UI); dates are plain `yyyy-MM-dd` strings, avoiding the UTC off-by-one.
+- [ ] Known and not changed: the nurse list filter by specialization applies `lower()` to a collection and probably fails at runtime; the nurse form still has pre-existing type errors; `Nurse.department` and shift departments are not matched (single "General" department).
 
 ## Phase 8: Tests
 
-- Unit tests per validator rule.
-- Property tests: hundreds of seeds across several months never violate a hard constraint; same seed gives same output.
-- Testcontainers integration tests: concurrent double-generate yields exactly one schedule; swap approve/reject races resolve correctly.
-- CI contract check that fails when generated TypeScript types are stale.
+Status: unit tests done; integration tests and the contract check are not.
+
+- [x] 53 unit tests (JUnit 5, no Spring context, no database): `ScheduleValidator` (every rule), `ScheduleGenerator` (an independent re-check of every hard rule across seeds, a leap-year February, 30- and 31-day months, determinism, continuity, locked shifts, excluded nurses, speed), `ReschedulePlanner`, `SwapPlanner`, `ShiftTimes`.
+- [x] CI: `.github/workflows` in both repos (`mvn test` on Java 17; `npm run build` on Node 20).
+- [ ] Testcontainers integration tests: concurrent double-generate yields exactly one schedule, swap approve/reject races, migrations V1 to V5 on a copy of real data. These need Docker and a database and have not been written.
+- [ ] Contract check: generate the TypeScript types from the springdoc OpenAPI spec and fail CI when they are stale (needs the backend running in CI).
 
 ## Findings added during implementation
 

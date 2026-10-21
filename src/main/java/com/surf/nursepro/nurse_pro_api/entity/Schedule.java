@@ -1,6 +1,7 @@
 package com.surf.nursepro.nurse_pro_api.entity;
 
 import com.surf.nursepro.nurse_pro_api.enums.ScheduleStatus;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
@@ -32,6 +33,11 @@ public class Schedule {
 
     @Enumerated(EnumType.STRING)
     private ScheduleStatus status;
+
+    /** The generation constraints (JSON) this schedule is checked against; null means the defaults. */
+    @JsonIgnore
+    @Column(columnDefinition = "TEXT")
+    private String rulesJson;
 
     @Version
     private Long version;
