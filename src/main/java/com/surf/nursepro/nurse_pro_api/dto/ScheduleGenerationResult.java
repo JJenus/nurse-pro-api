@@ -17,4 +17,7 @@ public class ScheduleGenerationResult {
     private Schedule schedule;
     private List<ScheduleConflict> conflicts;
     private List<WorkloadData> stats;
+
+    /** Seed used by the generator; send it back as `seed` to reproduce this exact schedule. Null on a replayed request. */
+    private Long seed;
 }

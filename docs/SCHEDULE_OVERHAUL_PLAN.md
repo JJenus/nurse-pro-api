@@ -40,13 +40,17 @@ Status: code written on branch `feature/schedule-overhaul`; **not yet compiled o
 
 ## Phase 2: Algorithm rewrite
 
-Deterministic, seedable, constraint-based.
+Status: done on `feature/schedule-overhaul`. `ScheduleGenerator` replaces the day-by-day random greedy loop. It was compiled and unit-tested in a harness (JDK 21, JUnit, Lombok) against stubs for Spring/JPA: 36 tests pass. The full Maven build and the database-backed paths have still not been run.
 
-- **Inputs:** nurses, unavailable dates, preferred shifts, `maxHoursPerWeek`, specializations vs shift requirements, last days of the previous month for continuity.
-- **Hard constraints:** min rest hours (default 11), max consecutive days, max consecutive Day/Night, weekly hours cap by ISO week (across month boundaries), no double-booking, night shifts respect next-day unavailability, min/max staff per shift.
-- **Soft goals:** even share of shifts, nights and weekends; preferences; forward rotation (Day, Evening, Night); avoid isolated single days off.
-- **Method:** (1) fill every shift to minimum, most constrained first; (2) fill to target with fairness scoring; (3) local-search repair pass; (4) anything unfixable becomes a conflict, never an exception or silent hole.
-- **Output:** schedule + conflicts + per-nurse stats.
+- [x] Deterministic and seedable; the seed used is returned in the generate response (`seed`) and accepted in the params to reproduce a schedule.
+- [x] Hard constraints (never violated, checked by an independent re-implementation in the tests): nurse unavailable dates including the morning after a night shift, one shift per nurse per day, minimum rest hours (default 11, so Evening to Day and Night to Day are blocked), max consecutive working days, max consecutive day-type and night-type shifts, weekly hours cap per ISO week (plus `maxOvertimeHours`).
+- [x] Continuity: the last 14 days of the previous month's schedule count for rest, consecutive-day and weekly-hours rules.
+- [x] Method: (1) fill every shift to the minimum, most constrained first; (2) raise all shifts evenly towards the maximum; (3) repair short shifts by taking a nurse from a shift that has surplus; (4) balance hours between the busiest and quietest nurses. Scoring uses fairness, nights and weekends, stated shift preferences and working in blocks.
+- [x] Impossible shifts are left short and reported as conflicts; the generator never throws for that.
+- [x] Ready for Phase 3: the request supports `locked` shifts (kept as they are), `excludedNurseIds`, a partial date range, and `history`.
+- Measured on a 30-day month: 10+ identical nurses fill every shift with at most one shift of difference between nurses; 8 nurses leave 8 positions short (capacity at 40h/week is below the minimum demand); 80 nurses generate in well under a second.
+- Behaviour to know: shifts are filled towards `maxNursesPerShift` (as before), limited by the weekly hours cap, so the roster is used as fully as the caps allow.
+- [ ] Not yet used by the generator: `rules` from the request, shift `requirements` vs nurse `specializations`, and department matching (single "General" department).
 
 ## Phase 3: Rescheduling
 

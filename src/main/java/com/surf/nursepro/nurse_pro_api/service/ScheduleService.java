@@ -51,6 +51,7 @@ public class ScheduleService {
     private final ScheduleConflictRepository conflictRepository;
     private final ScheduleValidator scheduleValidator;
     private final SwapPlanner swapPlanner;
+    private final ScheduleGenerator scheduleGenerator;
     private final IdempotencyKeyRepository idempotencyKeyRepository;
     private final ObjectMapper objectMapper;
 
@@ -228,7 +229,7 @@ public class ScheduleService {
         schedule.getShifts().size();
         List<ScheduleConflict> conflicts = conflictRepository.findByScheduleId(schedule.getId());
         List<WorkloadData> stats = workloadDataRepository.findByMonthAndYear(schedule.getMonth(), schedule.getYear());
-        return new ApiResponse<>(new ScheduleGenerationResult(schedule, conflicts, stats),
+        return new ApiResponse<>(new ScheduleGenerationResult(schedule, conflicts, stats, null),
                 "Schedule generated successfully (replayed)", true);
     }
 
@@ -264,55 +265,29 @@ public class ScheduleService {
             throw new IllegalArgumentException("No nurses available for scheduling");
         }
 
-        Map<String, NurseState> states = new HashMap<>();
-        nurses.forEach(nurse -> states.put(nurse.getId(), new NurseState()));
+        // The last days of the previous month's schedule still count for rest, consecutive-day and weekly-hours rules.
+        LocalDate firstOfMonth = LocalDate.of(params.getYear(), params.getMonth(), 1);
+        ScheduleGenerator.Request generation = new ScheduleGenerator.Request();
+        generation.setYear(params.getYear());
+        generation.setMonth(params.getMonth());
+        generation.setNurses(nurses);
+        generation.setConstraints(constraints);
+        generation.setSeed(params.getSeed());
+        generation.setHistory(loadHistoryBefore(firstOfMonth));
+
+        ScheduleGenerator.Result generated = scheduleGenerator.generate(generation);
+        if (generated.getUnfilledPositions() > 0) {
+            logger.warn("{} nurse position(s) could not be filled for {}/{}",
+                    generated.getUnfilledPositions(), params.getMonth(), params.getYear());
+        }
 
         Schedule schedule = new Schedule();
         schedule.setMonth(params.getMonth());
         schedule.setYear(params.getYear());
         schedule.setGeneratedAt(LocalDateTime.now());
         schedule.setStatus(ScheduleStatus.Draft);
-        List<Shift> shifts = new ArrayList<>();
-
-        LocalDate startDate = LocalDate.of(params.getYear(), params.getMonth(), 1);
-        int daysInMonth = startDate.getMonth().length(startDate.isLeapYear());
-
-        for (int day = 0; day < daysInMonth; day++) {
-            LocalDate currentDate = startDate.plusDays(day);
-            Set<String> assignedToday = new HashSet<>();
-            List<ShiftType> shiftTypes = Arrays.asList(ShiftType.values());
-            Collections.shuffle(shiftTypes);
-
-            for (ShiftType shiftType : shiftTypes) {
-                Shift shift = createShift(currentDate, shiftType, constraints.getMinNursesPerShift());
-                List<Nurse> eligibleNurses = findEligibleNurses(nurses, states, assignedToday, shiftType, currentDate, constraints);
-
-                int numToAssign = Math.min(eligibleNurses.size(), constraints.getMaxNursesPerShift());
-
-                if (eligibleNurses.isEmpty()) {
-                    logger.warn("No eligible nurses for shift: {} on {}", shiftType, currentDate);
-                    shift.setAssignedNurses(new LinkedHashSet<>());
-                    shifts.add(shift);
-                    continue;
-                }
-
-                Collections.shuffle(eligibleNurses);
-                List<String> assignedNurseIds = eligibleNurses.stream()
-                        .limit(numToAssign)
-                        .map(Nurse::getId)
-                        .collect(Collectors.toList());
-
-                shift.setAssignedNurses(new LinkedHashSet<>(assignedNurseIds));
-                shifts.add(shift);
-
-                updateNurseStates(states, assignedNurseIds, shiftType, day, currentDate);
-                assignedToday.addAll(assignedNurseIds);
-            }
-
-            updateRestStates(states, assignedToday, day);
-        }
-
-        shifts.forEach(s -> s.setSchedule(schedule));
+        List<Shift> shifts = generated.getShifts();
+        shifts.forEach(sh -> sh.setSchedule(schedule));
         schedule.setShifts(shifts);
         Schedule savedSchedule = scheduleRepository.save(schedule);
         updateWorkloadData(savedSchedule);
@@ -320,132 +295,22 @@ public class ScheduleService {
         List<WorkloadData> stats = workloadDataRepository.findByMonthAndYear(savedSchedule.getMonth(), savedSchedule.getYear());
 
         logger.info("Generated schedule ID: {} for {}/{}", savedSchedule.getId(), params.getMonth(), params.getYear());
-        return new ApiResponse<>(new ScheduleGenerationResult(savedSchedule, conflicts, stats), "Schedule generated successfully", true);
+        return new ApiResponse<>(new ScheduleGenerationResult(savedSchedule, conflicts, stats, generated.getSeed()),
+                "Schedule generated successfully", true);
     }
 
-    private Shift createShift(LocalDate date, ShiftType type, int requiredStaff) {
-        Shift shift = new Shift();
-        shift.setDate(date);
-        shift.setType(type);
-        shift.setDepartment("General");
-        shift.setRequiredStaff(requiredStaff);
-
-        switch (type) {
-            case Day:
-                shift.setStartTime("07:00");
-                shift.setEndTime("15:00");
-                break;
-            case Evening:
-                shift.setStartTime("15:00");
-                shift.setEndTime("23:00");
-                break;
-            case Night:
-                shift.setStartTime("23:00");
-                shift.setEndTime("07:00");
-                break;
+    /** Shifts of the schedule that ends right before {@code firstDay}, limited to the last 14 days. */
+    private List<Shift> loadHistoryBefore(LocalDate firstDay) {
+        LocalDate previousMonth = firstDay.minusMonths(1);
+        Optional<Schedule> previous = scheduleRepository.findByMonthAndYear(
+                previousMonth.getMonthValue(), previousMonth.getYear());
+        if (previous.isEmpty()) {
+            return new ArrayList<>();
         }
-
-        return shift;
-    }
-
-    private List<Nurse> findEligibleNurses(List<Nurse> nurses, Map<String, NurseState> states,
-                                           Set<String> assignedToday, ShiftType shiftType,
-                                           LocalDate currentDate,
-                                           ScheduleGenerationParams.Constraints constraints) {
-        String currentType = shiftType == ShiftType.Night ? "night" : "day";
-        List<Nurse> eligible = new ArrayList<>();
-
-        for (Nurse nurse : nurses) {
-            if (assignedToday.contains(nurse.getId()) ||
-                    (nurse.getUnavailableDates() != null && nurse.getUnavailableDates().contains(currentDate))) {
-                continue;
-            }
-
-            NurseState state = states.get(nurse.getId());
-            if (state.restLeft > 0 || (state.afterNightRest && shiftType != ShiftType.Day)) {
-                continue;
-            }
-
-            boolean canAssign = true;
-            if (state.lastWorkDay == currentDate.getDayOfMonth() - 1) {
-                if (state.lastType != null && state.lastType.equals(currentType)) {
-                    int maxConsecutive = currentType.equals("day")
-                            ? constraints.getMaxConsecutiveDay() : constraints.getMaxConsecutiveNight();
-                    if (state.consecutive + 1 > maxConsecutive) {
-                        canAssign = false;
-                    }
-                } else if (state.lastType != null) {
-                    int prevK = state.consecutive;
-                    int requiredOff = state.lastType.equals("day") ?
-                            offDaysForDay(prevK) : offDaysForNight(prevK);
-                    if (requiredOff > 0) {
-                        canAssign = false;
-                    }
-                }
-            }
-
-            if (canAssign) {
-                eligible.add(nurse);
-            }
-        }
-
-        eligible.sort((a, b) -> {
-            NurseState stateA = states.get(a.getId());
-            NurseState stateB = states.get(b.getId());
-            return Double.compare(
-                    stateA.workDays + Math.random(),
-                    stateB.workDays + Math.random()
-            );
-        });
-
-        logger.debug("Found {} eligible nurses for {} shift on {}", eligible.size(), shiftType, currentDate);
-        return eligible;
-    }
-
-    private void updateNurseStates(Map<String, NurseState> states, List<String> assignedNurseIds,
-                                   ShiftType shiftType, int day, LocalDate currentDate) {
-        String currentType = shiftType == ShiftType.Night ? "night" : "day";
-
-        for (String nurseId : assignedNurseIds) {
-            NurseState state = states.get(nurseId);
-            state.workDays++;
-            state.assignments[day] = shiftType.toString();
-
-            if (day > 0 && state.lastWorkDay == day - 1 && state.lastType != null && state.lastType.equals(currentType)) {
-                state.consecutive++;
-            } else {
-                state.consecutive = 1;
-                state.lastType = currentType;
-            }
-            state.lastWorkDay = day;
-            state.afterNightRest = false;
-        }
-    }
-
-    private void updateRestStates(Map<String, NurseState> states, Set<String> assignedToday, int day) {
-        states.forEach((nurseId, state) -> {
-            if (!assignedToday.contains(nurseId) && state.lastWorkDay == day - 1 && state.lastType != null) {
-                int k = state.consecutive;
-                String t = state.lastType;
-                int off = t.equals("day") ? offDaysForDay(k) : offDaysForNight(k);
-                state.restLeft = off;
-                if (t.equals("night")) {
-                    state.afterNightRest = true;
-                }
-                logger.debug("Nurse {} assigned {} rest days after {} {} shifts", nurseId, off, k, t);
-            }
-            if (state.restLeft > 0) {
-                state.restLeft--;
-            }
-        });
-    }
-
-    private int offDaysForDay(int k) {
-        return k < 2 ? 0 : k - 1;
-    }
-
-    private int offDaysForNight(int k) {
-        return k < 2 ? 0 : k - 1;
+        LocalDate from = firstDay.minusDays(14);
+        return previous.get().getShifts().stream()
+                .filter(sh -> sh.getDate() != null && !sh.getDate().isBefore(from) && sh.getDate().isBefore(firstDay))
+                .collect(Collectors.toList());
     }
 
     private void updateWorkloadData(Schedule schedule) {
@@ -1370,15 +1235,5 @@ public class ScheduleService {
         String[] monthNames = {"January", "February", "March", "April", "May", "June",
                 "July", "August", "September", "October", "November", "December"};
         return monthNames[month - 1];
-    }
-
-    private static class NurseState {
-        int lastWorkDay = -1;
-        int consecutive = 0;
-        String lastType = null;
-        int restLeft = 0;
-        boolean afterNightRest = false;
-        int workDays = 0;
-        String[] assignments = new String[31];
     }
 }
