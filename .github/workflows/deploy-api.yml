@@ -1,0 +1,136 @@
+name: API CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build jar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Package
+        run: ./mvnw -B -ntp clean package -DskipTests
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nursepro-jar
+          path: target/nursepro.jar
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy to AlwaysData
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    concurrency:
+      group: api-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nursepro-jar
+
+      - name: Install SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.ALWAYSDATA_SSH_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ssh-nursepro.alwaysdata.net >> ~/.ssh/known_hosts
+
+      - name: Write runtime secrets
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" |
+            ssh -i ~/.ssh/id_ed25519 nursepro@ssh-nursepro.alwaysdata.net \
+              'umask 077; mkdir -p ~/.config/nursepro; cat > ~/.config/nursepro/env'
+
+      - name: Upload JVM wrapper
+        run: |
+          scp -i ~/.ssh/id_ed25519 deploy/alwaysdata-java \
+            nursepro@ssh-nursepro.alwaysdata.net:.local/bin/java
+          ssh -i ~/.ssh/id_ed25519 nursepro@ssh-nursepro.alwaysdata.net \
+            'chmod +x ~/.local/bin/java'
+
+      - name: Upload jar
+        run: scp -i ~/.ssh/id_ed25519 nursepro.jar nursepro@ssh-nursepro.alwaysdata.net:nurpro.jar
+
+      - name: Check restart token
+        id: restart
+        env:
+          ALWAYSDATA_API_TOKEN: ${{ secrets.ALWAYSDATA_API_TOKEN }}
+        run: |
+          if [ -n "$ALWAYSDATA_API_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::ALWAYSDATA_API_TOKEN is not set. The uploaded jar will be used after a manual restart."
+          fi
+
+      - name: Restart site
+        if: steps.restart.outputs.enabled == 'true'
+        env:
+          ALWAYSDATA_API_TOKEN: ${{ secrets.ALWAYSDATA_API_TOKEN }}
+        run: |
+          site_id=$(curl -fsS --basic --user "${ALWAYSDATA_API_TOKEN}:" \
+            https://api.alwaysdata.com/v1/site/ |
+            jq -r '.[] | select((.addresses // []) | index("nursepro.alwaysdata.net")) | .id' |
+            head -1)
+
+          if [ -z "$site_id" ] || [ "$site_id" = "null" ]; then
+            echo "Could not find the nursepro.alwaysdata.net site." >&2
+            exit 1
+          fi
+
+          echo "Restarting AlwaysData site ${site_id}"
+          curl -fsS -X POST --basic --user "${ALWAYSDATA_API_TOKEN}:" \
+            -H 'alwaysdata-synchronous: yes' \
+            "https://api.alwaysdata.com/v1/site/${site_id}/restart/"
+
+      - name: Verify restart
+        if: steps.restart.outputs.enabled == 'true'
+        run: |
+          for attempt in $(seq 1 36); do
+            status=$(curl -s -o /dev/null -w '%{http_code}' https://nursepro.alwaysdata.net/actuator/health || true)
+            if [ "$status" = "200" ]; then
+              echo "API is healthy after ${attempt} attempt(s)."
+              exit 0
+            fi
+            echo "Health check returned ${status}; retrying in 5s..."
+            sleep 5
+          done
+
+          echo "API did not become healthy in time."
+          ssh -i ~/.ssh/id_ed25519 nursepro@ssh-nursepro.alwaysdata.net \
+            "find ~/admin/logs/sites -type f -name '*.log' -print0 | xargs -0 ls -t | head -1 | xargs tail -40"
+          exit 1
+
+      - name: Manual restart reminder
+        if: steps.restart.outputs.enabled != 'true'
+        run: |
+          echo "::notice::Jar uploaded. Restart the site in AlwaysData to activate it."
+          {
+            echo "### Manual restart required"
+            echo
+            echo "The new jar was uploaded to ~/nurpro.jar."
+            echo "Restart the site in **Web > Sites** in AlwaysData to activate it."
+            echo "Add the ALWAYSDATA_API_TOKEN secret to automate this step."
+          } >> "$GITHUB_STEP_SUMMARY"

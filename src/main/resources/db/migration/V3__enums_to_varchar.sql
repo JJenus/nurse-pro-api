@@ -1,10 +1,18 @@
--- V3: store enum-backed columns as VARCHAR.
--- Hibernate 6 created these as native MySQL ENUM columns on existing databases, so adding a new
--- enum constant (e.g. ScheduleConflictType.overlap, SwapRequestStatus.Cancelled) would fail on insert
--- ("Data truncated"). VARCHAR keeps every existing value and lets the Java enums evolve.
-ALTER TABLE schedules MODIFY `status` VARCHAR(32) NULL;
-ALTER TABLE shifts MODIFY `type` VARCHAR(32) NULL;
-ALTER TABLE schedule_conflicts MODIFY `type` VARCHAR(32) NULL, MODIFY severity VARCHAR(32) NULL;
-ALTER TABLE swap_requests MODIFY `status` VARCHAR(32) NULL;
-ALTER TABLE schedule_rules MODIFY `type` VARCHAR(32) NULL;
-ALTER TABLE nurses MODIFY experience_level VARCHAR(32) NULL;
+-- V3: let the Java enums evolve.
+-- Hibernate 6 created enum-backed columns on PostgreSQL as VARCHAR with a CHECK constraint listing the values known at
+-- the time, so a new constant (ScheduleConflictType.overlap / rest / consecutive, SwapRequestStatus.Cancelled) would be
+-- rejected on insert. The only CHECK constraints on these tables are those enum checks, so they are all dropped.
+DO $$
+DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN
+        SELECT c.conname, c.conrelid::regclass AS tbl
+        FROM pg_constraint c
+        WHERE c.contype = 'c'
+          AND c.conrelid IN ('schedules'::regclass, 'shifts'::regclass, 'schedule_conflicts'::regclass,
+                             'swap_requests'::regclass, 'schedule_rules'::regclass, 'nurses'::regclass)
+    LOOP
+        EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', r.tbl, r.conname);
+    END LOOP;
+END $$;

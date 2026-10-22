@@ -3,6 +3,10 @@
 Covers `nurse-pro` (React frontend) and `nurse-pro-api` (Spring Boot backend).
 Goal: make the schedule flow correct end to end, including the generation algorithm, rescheduling, idempotency and duplicate protection, edge cases, and a frontend/backend contract that cannot drift.
 
+## Database
+
+PostgreSQL (AlwaysData in production). Migrations V1 to V5 are PostgreSQL SQL; each runs in a single transaction, so a failure leaves the schema untouched. `scripts/verify-migrations.sh` rehearses them on a scratch database with deliberately dirty legacy data (duplicate schedules, shifts, workload rows and pending swaps, orphan shifts, Hibernate-style enum CHECK constraints) and asserts the outcome and every new constraint; it passed on PostgreSQL 16, and CI runs it on every push.
+
 ## Guiding principles
 
 1. **One rules engine.** A single `ScheduleValidator` is used by generation, manual edits, swaps and rescheduling.
@@ -25,7 +29,7 @@ Goal: make the schedule flow correct end to end, including the generation algori
 
 Status: code written on branch `feature/schedule-overhaul`; **not yet compiled or run** (no Maven access in the authoring environment). Test against a copy of the database before merging.
 
-- [x] Flyway added (`flyway-core`, `flyway-mysql`); `ddl-auto` set to `none` in dev and prod. `validate` is deliberately not used yet: Hibernate 6 + MySQL enum columns trip schema validation, so switch to `validate` only after verifying against a real DB.
+- [x] Flyway added (`flyway-core`, `flyway-database-postgresql`); `ddl-auto` set to `none` in dev and prod (Flyway owns the schema; `validate` is used in CI to check the entities against the migrated schema).
 - [x] `V1__baseline_schema.sql`: `CREATE TABLE IF NOT EXISTS` for the legacy schema (no-op on existing databases, which are baselined at version 0).
 - [x] `V2__schedule_integrity.sql`: dedupe, then constraints. Keeps the newest schedule per month, the lowest-id shift per slot, the most recently updated workload row.
 - [x] `Schedule`: unique `(year, month)`, `@Version`; `shifts` is now the inverse side (`mappedBy = "schedule"`, `orphanRemoval`).
@@ -98,7 +102,7 @@ Status: backend and frontend done on `feature/schedule-overhaul` (backend not co
 - [x] Generation params unified (`minNursesPerShift`, `maxNursesPerShift`, `maxConsecutiveShifts`, `maxConsecutiveDay`, `maxConsecutiveNight`, `minRestHours`, `maxOvertimeHours`, `seed`, `rules`) with validation and defaults; min/max nurses and consecutive limits now drive the existing generator. Generate returns `{schedule, conflicts, stats}`.
 - [x] Conflicts and workload are refreshed whenever shifts change. Archived schedules reject edits (409). Status changes are idempotent (Draft, Published, Archived).
 - [x] `reviewedBy` comes from the authenticated principal (falls back to `system`).
-- [x] V3 migration converts enum columns to VARCHAR so new enum values (`overlap`, later `Cancelled`) can be stored.
+- [x] V3 migration drops the CHECK constraints Hibernate 6 puts on enum columns, so new enum values (`overlap`, `rest`, `consecutive`, `Cancelled`) can be stored.
 - [ ] Role checks on approve/reject: **blocked**, see "Findings added during implementation".
 
 
@@ -185,4 +189,4 @@ Status: unit tests done; integration tests and the contract check are not.
 - Min rest is 11 hours; single "General" department for now, model ready for more.
 - A schedule is unique per month; regenerating is allowed only for drafts.
 - Existing data is small enough for a one-off dedupe script.
-- DB is Postgres or MySQL, so Flyway plus unique constraints work.
+- The database is PostgreSQL (main moved from MySQL to PostgreSQL while this work was in progress, so migrations V1 to V5 were rewritten for PostgreSQL).
