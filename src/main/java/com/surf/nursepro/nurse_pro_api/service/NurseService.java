@@ -9,6 +9,8 @@ import com.surf.nursepro.nurse_pro_api.util.ShiftTimes;
 import org.springframework.beans.factory.annotation.Value;
 import com.surf.nursepro.nurse_pro_api.repository.NurseRepository;
 import com.surf.nursepro.nurse_pro_api.repository.ShiftRepository;
+import jakarta.persistence.criteria.Join;
+import jakarta.persistence.criteria.JoinType;
 import jakarta.persistence.criteria.Predicate;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.jpa.domain.Specification;
@@ -60,10 +62,13 @@ public class NurseService {
 
             // Filter by specialization if provided
             if (specialization != null && !specialization.trim().isEmpty()) {
+                // specializations is a collection: join it (a lower() of the collection itself is not valid)
+                Join<Nurse, String> specs = root.join("specializations", JoinType.LEFT);
                 predicates.add(criteriaBuilder.like(
-                        criteriaBuilder.lower(root.get("specializations")),
+                        criteriaBuilder.lower(specs),
                         "%" + specialization.trim().toLowerCase() + "%"
                 ));
+                query.distinct(true);
             }
 
             // Combine predicates with AND

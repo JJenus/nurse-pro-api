@@ -256,6 +256,43 @@ class ReschedulePlannerTest {
         assertEquals(first.getChanges(), second.getChanges());
     }
 
+    @Test
+    void shiftsWithRequirementsOnlyGetQualifiedNurses() {
+        List<Nurse> nurses = roster(14);
+        Set<String> icuNurses = new HashSet<>();
+        for (int i = 3; i <= 12; i++) {   // ten qualified nurses, so a few are always free on the day
+            String id = String.format("n%02d", i);
+            icuNurses.add(id);
+            nurses.stream().filter(n -> n.getId().equals(id)).forEach(n -> n.setSpecializations(new ArrayList<>(List.of("ICU"))));
+        }
+        List<Shift> shifts = existingSchedule(nurses, 9L);
+        Shift icu = find(shifts, LocalDate.of(2026, 11, 20), ShiftType.Day);
+        icu.setAssignedNurses(new LinkedHashSet<>());
+        icu.setRequirements(new ArrayList<>(List.of("icu")));
+
+        RescheduleResult result = planner.plan(input(nurses, shifts, NOV_16, NOV_30, RescheduleMode.FILL_GAPS)).getResult();
+
+        RescheduleResult.ShiftChange change = changeFor(result, icu.getId());
+        assertNotNull(change);
+        assertEquals(2, change.getAdded().size());
+        assertTrue(icuNurses.containsAll(change.getAdded()), "added " + change.getAdded());
+    }
+
+    @Test
+    void shiftThatNobodyIsQualifiedForStaysShortAndIsReported() {
+        List<Nurse> nurses = roster(14);   // nobody has the specialization
+        List<Shift> shifts = existingSchedule(nurses, 9L);
+        Shift icu = find(shifts, LocalDate.of(2026, 11, 20), ShiftType.Day);
+        icu.setAssignedNurses(new LinkedHashSet<>());
+        icu.setRequirements(new ArrayList<>(List.of("ICU")));
+
+        RescheduleResult result = planner.plan(input(nurses, shifts, NOV_16, NOV_30, RescheduleMode.FILL_GAPS)).getResult();
+
+        assertNull(changeFor(result, icu.getId()));
+        assertEquals(2, result.getUnfilledPositions());
+        assertTrue(result.getConflicts().stream().anyMatch(c -> c.getType() == ScheduleConflictType.understaffed));
+    }
+
     /** Small helper so tests can read the result and the plan from one object. */
     private static class Plan2 {
         final ReschedulePlanner.Plan plan;

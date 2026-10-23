@@ -228,4 +228,30 @@ class ScheduleValidatorTest {
 
         assertTrue(validator.validate("sch", shifts, nurses(part), rules).isEmpty());
     }
+
+    // ---- qualifications ---------------------------------------------------------------------------------
+
+    @Test
+    void nurseWithoutTheRequiredSpecializationIsFlagged() {
+        Shift icu = shift("s1", MONDAY, ShiftType.Day, 1, "a");
+        icu.setRequirements(new ArrayList<>(List.of("ICU", "Ventilator")));
+        Nurse partlyQualified = nurse("a");
+        partlyQualified.setSpecializations(new ArrayList<>(List.of("icu")));   // case-insensitive, still missing one
+
+        List<ScheduleConflict> result = validator.validate("sch", List.of(icu), nurses(partlyQualified));
+
+        assertEquals(1, result.size());
+        assertEquals(ScheduleConflictType.qualification, result.get(0).getType());
+        assertTrue(result.get(0).getMessage().contains("Ventilator"));
+    }
+
+    @Test
+    void fullyQualifiedNurseIsAccepted() {
+        Shift icu = shift("s1", MONDAY, ShiftType.Day, 1, "a");
+        icu.setRequirements(new ArrayList<>(List.of("ICU")));
+        Nurse qualified = nurse("a");
+        qualified.setSpecializations(new ArrayList<>(List.of("ICU", "Pediatrics")));
+
+        assertTrue(validator.validate("sch", List.of(icu), nurses(qualified)).isEmpty());
+    }
 }

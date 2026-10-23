@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.surf.nursepro.nurse_pro_api.dto.MoveNurseRequest;
 import com.surf.nursepro.nurse_pro_api.dto.RescheduleRequest;
 import com.surf.nursepro.nurse_pro_api.dto.RescheduleResult;
+import com.surf.nursepro.nurse_pro_api.dto.SwapCheckResult;
 import com.surf.nursepro.nurse_pro_api.dto.SwapRequestCreate;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationParams;
 import com.surf.nursepro.nurse_pro_api.dto.ScheduleGenerationResult;
@@ -193,6 +194,9 @@ public class ScheduleService {
      */
     @Transactional
     public ApiResponse<ScheduleGenerationResult> generateSchedule(ScheduleGenerationParams params, String idempotencyKey) {
+        if (params != null && params.isPreview()) {
+            return createSchedule(params, false);   // nothing is saved, so there is nothing to make idempotent
+        }
         String key = idempotencyKey == null || idempotencyKey.isBlank() ? null : idempotencyKey.trim();
         String requestHash = null;
         if (key != null) {
@@ -215,7 +219,7 @@ public class ScheduleService {
             }
         }
 
-        ApiResponse<ScheduleGenerationResult> response = createSchedule(params);
+        ApiResponse<ScheduleGenerationResult> response = createSchedule(params, true);
 
         if (key != null) {
             // Stored in the same transaction as the schedule, so the key exists if and only if the schedule does.
@@ -251,7 +255,7 @@ public class ScheduleService {
         }
     }
 
-    private ApiResponse<ScheduleGenerationResult> createSchedule(ScheduleGenerationParams params) {
+    private ApiResponse<ScheduleGenerationResult> createSchedule(ScheduleGenerationParams params, boolean persist) {
         if (params == null || params.getMonth() < 1 || params.getMonth() > 12 || params.getYear() < 2000) {
             logger.warn("Invalid schedule generation parameters: {}", params);
             throw new IllegalArgumentException("Invalid month or year");
@@ -260,7 +264,9 @@ public class ScheduleService {
         Optional<Schedule> existingSchedule = scheduleRepository.findByMonthAndYear(params.getMonth(), params.getYear());
         if (existingSchedule.isPresent()) {
             if (params.isReplaceDraft() && existingSchedule.get().getStatus() == ScheduleStatus.Draft) {
-                discardSchedule(existingSchedule.get());
+                if (persist) {
+                    discardSchedule(existingSchedule.get());
+                }
             } else {
                 logger.warn("Schedule already exists for month {} and year {}", params.getMonth(), params.getYear());
                 throw new ConflictException("Schedule already exists for month " + params.getMonth() + " and year "
@@ -296,6 +302,10 @@ public class ScheduleService {
                     generated.getUnfilledPositions(), params.getMonth(), params.getYear());
         }
 
+        if (!persist) {
+            return previewResult(params, constraints, nurses, generated);
+        }
+
         Schedule schedule = new Schedule();
         schedule.setMonth(params.getMonth());
         schedule.setYear(params.getYear());
@@ -329,7 +339,33 @@ public class ScheduleService {
                 .collect(Collectors.toList());
     }
 
-    private void updateWorkloadData(Schedule schedule) {
+    /** The generated schedule as it would be saved, with its conflicts and workload, without saving anything. */
+    private ApiResponse<ScheduleGenerationResult> previewResult(ScheduleGenerationParams params,
+                                                                ScheduleGenerationParams.Constraints constraints,
+                                                                List<Nurse> nurses, ScheduleGenerator.Result generated) {
+        Schedule schedule = new Schedule();
+        schedule.setMonth(params.getMonth());
+        schedule.setYear(params.getYear());
+        schedule.setGeneratedAt(LocalDateTime.now());
+        schedule.setStatus(ScheduleStatus.Draft);
+        List<Shift> shifts = generated.getShifts();
+        int counter = 0;
+        for (Shift shift : shifts) {
+            shift.setSchedule(schedule);
+            shift.setId("preview-" + counter++);
+        }
+        schedule.setShifts(shifts);
+
+        Map<String, Nurse> nurseById = new HashMap<>();
+        nurses.forEach(n -> nurseById.put(n.getId(), n));
+        List<ScheduleConflict> conflicts = scheduleValidator.validate(null, shifts, nurseById, constraints);
+        List<WorkloadData> stats = new ArrayList<>(computeWorkload(schedule).values());
+        return new ApiResponse<>(new ScheduleGenerationResult(schedule, conflicts, stats, generated.getSeed()),
+                "Preview generated (nothing was saved)", true);
+    }
+
+    /** Per-nurse totals for the shifts of a schedule; pure, nothing is saved. */
+    private Map<String, WorkloadData> computeWorkload(Schedule schedule) {
         Map<String, WorkloadData> computed = new LinkedHashMap<>();
 
         for (Shift shift : schedule.getShifts()) {
@@ -356,6 +392,11 @@ public class ScheduleService {
                 }
             }
         }
+        return computed;
+    }
+
+    private void updateWorkloadData(Schedule schedule) {
+        Map<String, WorkloadData> computed = computeWorkload(schedule);
 
         // Upsert by (nurse, month, year): the table has a unique key on it, and re-running must never duplicate.
         Map<String, WorkloadData> existing = new HashMap<>();
@@ -858,27 +899,9 @@ public class ScheduleService {
             throw new ConflictException("Cannot approve a swap request that is " + request.getStatus());
         }
 
-        Shift a = shiftRepository.findById(request.getShiftId())
-                .orElseThrow(() -> new ConflictException("The shift no longer exists"));
-        Shift b = request.getTargetShiftId() == null ? null : shiftRepository.findById(request.getTargetShiftId())
-                .orElseThrow(() -> new ConflictException("The offered shift no longer exists"));
-
-        Map<String, Set<String>> plan;
-        try {
-            assertSwappable(a);
-            if (b != null) {
-                assertSwappable(b);
-            }
-            // The roster may have changed since the request was made, so everything is checked again.
-            plan = swapPlanner.plan(a, b, request.getRequesterId(), request.getTargetId());
-        } catch (IllegalArgumentException e) {
-            throw new ConflictException(e.getMessage());
-        }
-        List<Shift> affected = b == null ? List.of(a) : List.of(a, b);
-        List<String> problems = introducedConflicts(affected, plan);
-        if (!problems.isEmpty()) {
-            throw new ConflictException("This swap would cause conflicts: " + String.join("; ", problems));
-        }
+        SwapApproval approval = prepareApproval(request);
+        List<Shift> affected = approval.affected;
+        Map<String, Set<String>> plan = approval.plan;
 
         for (Shift shift : affected) {
             shift.getAssignedNurses().clear();
@@ -910,6 +933,64 @@ public class ScheduleService {
         }
         logger.info("Approved swap request ID: {}", savedRequest.getId());
         return new ApiResponse<>(savedRequest, "Swap request approved", true);
+    }
+
+    /** Everything that must hold for a pending swap to be approved right now; throws ConflictException when it cannot be. */
+    private static final class SwapApproval {
+        final List<Shift> affected;
+        final Map<String, Set<String>> plan;
+
+        SwapApproval(List<Shift> affected, Map<String, Set<String>> plan) {
+            this.affected = affected;
+            this.plan = plan;
+        }
+    }
+
+    private SwapApproval prepareApproval(SwapRequest request) {
+        Shift a = shiftRepository.findById(request.getShiftId())
+                .orElseThrow(() -> new ConflictException("The shift no longer exists"));
+        Shift b = request.getTargetShiftId() == null ? null : shiftRepository.findById(request.getTargetShiftId())
+                .orElseThrow(() -> new ConflictException("The offered shift no longer exists"));
+
+        Map<String, Set<String>> plan;
+        try {
+            assertSwappable(a);
+            if (b != null) {
+                assertSwappable(b);
+            }
+            // The roster may have changed since the request was made, so everything is checked again.
+            plan = swapPlanner.plan(a, b, request.getRequesterId(), request.getTargetId());
+        } catch (IllegalArgumentException e) {
+            throw new ConflictException(e.getMessage());
+        }
+        List<Shift> affected = b == null ? List.of(a) : List.of(a, b);
+        List<String> problems = introducedConflicts(affected, plan);
+        if (!problems.isEmpty()) {
+            throw new ConflictException("This swap would cause conflicts: " + String.join("; ", problems));
+        }
+        return new SwapApproval(affected, plan);
+    }
+
+    /** Read-only: can this swap request be approved right now? Used to show the manager why not before they click. */
+    @Transactional(readOnly = true)
+    public ApiResponse<SwapCheckResult> checkSwapRequest(String requestId) {
+        if (requestId == null || requestId.isBlank()) {
+            throw new IllegalArgumentException("Invalid swap request ID");
+        }
+        SwapRequest request = swapRequestRepository.findById(requestId)
+                .orElseThrow(() -> new IllegalArgumentException("Swap request not found"));
+        if (request.getStatus() != SwapRequestStatus.Pending) {
+            return new ApiResponse<>(new SwapCheckResult(false, String.valueOf(request.getStatus()),
+                    List.of("The request is already " + request.getStatus())), "Swap request checked", true);
+        }
+        try {
+            prepareApproval(request);
+            return new ApiResponse<>(new SwapCheckResult(true, "Pending", new ArrayList<>()),
+                    "The swap can be approved", true);
+        } catch (ConflictException e) {
+            return new ApiResponse<>(new SwapCheckResult(false, "Pending", List.of(e.getMessage())),
+                    "The swap cannot be approved", true);
+        }
     }
 
     @Transactional

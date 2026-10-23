@@ -63,6 +63,7 @@ public class ScheduleValidator {
                 }
 
                 checkAvailability(scheduleId, shift, nurse, conflicts);
+                checkQualification(scheduleId, shift, nurse, conflicts);
 
                 List<Shift> sameDay = byNurseAndDay.get(nurseId).get(shift.getDate());
                 if (sameDay != null && sameDay.size() > 1) {
@@ -209,6 +210,30 @@ public class ScheduleValidator {
                     "Check for available nurses with matching qualifications",
                     "Consider overtime assignments",
                     "Review shift requirements"));
+        }
+    }
+
+    private void checkQualification(String scheduleId, Shift shift, Nurse nurse, List<ScheduleConflict> out) {
+        if (shift.getRequirements() == null || shift.getRequirements().isEmpty()) {
+            return;
+        }
+        Set<String> has = new HashSet<>();
+        if (nurse.getSpecializations() != null) {
+            for (String spec : nurse.getSpecializations()) {
+                if (spec != null) has.add(spec.trim().toLowerCase());
+            }
+        }
+        List<String> missing = new ArrayList<>();
+        for (String required : shift.getRequirements()) {
+            if (required != null && !required.isBlank() && !has.contains(required.trim().toLowerCase())) {
+                missing.add(required.trim());
+            }
+        }
+        if (!missing.isEmpty()) {
+            out.add(conflict(scheduleId, shift, nurse.getId(), ScheduleConflictType.qualification,
+                    ScheduleConflictSeverity.high,
+                    String.format("%s lacks the required qualification(s): %s", name(nurse), String.join(", ", missing)),
+                    "Assign a nurse with the required specialization"));
         }
     }
 

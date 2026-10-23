@@ -10,6 +10,7 @@ import com.surf.nursepro.nurse_pro_api.dto.RescheduleRequest;
 import com.surf.nursepro.nurse_pro_api.dto.RescheduleResult;
 import com.surf.nursepro.nurse_pro_api.entity.ScheduleChange;
 import com.surf.nursepro.nurse_pro_api.dto.ShiftRequest;
+import com.surf.nursepro.nurse_pro_api.dto.SwapCheckResult;
 import com.surf.nursepro.nurse_pro_api.dto.SwapRequestCreate;
 import com.surf.nursepro.nurse_pro_api.entity.ScheduleConflict;
 import com.surf.nursepro.nurse_pro_api.enums.ScheduleStatus;
@@ -136,6 +137,12 @@ public class ScheduleController {
     public ResponseEntity<ApiResponse<List<SwapRequest>>> getSwapRequests(
             @RequestParam(required = false) SwapRequestStatus status) {
         return ResponseEntity.ok(scheduleService.getSwapRequests(status));
+    }
+
+    @GetMapping("/swap-requests/{requestId}/check")
+    @Operation(summary = "Check whether a swap request can be approved right now, without changing anything")
+    public ResponseEntity<ApiResponse<SwapCheckResult>> checkSwapRequest(@PathVariable String requestId) {
+        return ResponseEntity.ok(scheduleService.checkSwapRequest(requestId));
     }
 
     @PutMapping("/swap-requests/{requestId}/approve")

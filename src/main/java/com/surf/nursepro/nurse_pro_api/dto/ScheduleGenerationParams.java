@@ -36,6 +36,9 @@ public class ScheduleGenerationParams {
     /** When a Draft schedule already exists for the month, replace it instead of failing with 409. */
     private boolean replaceDraft;
 
+    /** Generate and return the schedule without saving anything. Send the same params with this off (and the returned seed) to save it. */
+    private boolean preview;
+
     @JsonIgnore
     public Constraints effectiveConstraints() {
         return constraints != null ? constraints : new Constraints();

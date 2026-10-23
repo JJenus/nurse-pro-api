@@ -63,6 +63,7 @@ public class ScheduleGenerator {
         private boolean fillToMaximum = true;
         private Set<String> onlySlotKeys;
         private Map<String, Integer> requiredStaffBySlot = new HashMap<>();
+        private Map<String, Collection<String>> requirementsBySlot = new HashMap<>();
 
         public int getYear() { return year; }
         public void setYear(int year) { this.year = year; }
@@ -95,6 +96,9 @@ public class ScheduleGenerator {
         public Set<String> getOnlySlotKeys() { return onlySlotKeys; }
         public void setOnlySlotKeys(Set<String> onlySlotKeys) { this.onlySlotKeys = onlySlotKeys; }
         /** Per-slot minimum staffing that overrides the constraint default (key: {@link #slotKey}). */
+        public Map<String, Collection<String>> getRequirementsBySlot() { return requirementsBySlot; }
+        /** Qualifications a slot needs (key: slot key); only nurses whose specializations include all of them are eligible. */
+        public void setRequirementsBySlot(Map<String, Collection<String>> requirementsBySlot) { this.requirementsBySlot = requirementsBySlot; }
         public Map<String, Integer> getRequiredStaffBySlot() { return requiredStaffBySlot; }
         public void setRequiredStaffBySlot(Map<String, Integer> requiredStaffBySlot) { this.requiredStaffBySlot = requiredStaffBySlot; }
     }
@@ -180,6 +184,8 @@ public class ScheduleGenerator {
         final boolean history;
         final Set<String> assigned = new LinkedHashSet<>();
         final Set<String> fixed = new HashSet<>();
+        /** Lower-case qualifications a nurse must have to work this slot. */
+        final Set<String> requirements = new HashSet<>();
 
         Slot(LocalDate date, ShiftType type, LocalDateTime start, double hours, int min, int max, boolean history) {
             this.date = date;
@@ -304,6 +310,12 @@ public class ScheduleGenerator {
                 Slot slot = new Slot(date, type, date.atTime(defaultStart(type)), SHIFT_HOURS,
                         min, Math.max(ctx.maxNurses, min), false);
                 ctx.slots.add(slot);
+                Collection<String> required = request.getRequirementsBySlot() == null ? null : request.getRequirementsBySlot().get(key);
+                if (required != null) {
+                    for (String r : required) {
+                        if (r != null && !r.isBlank()) slot.requirements.add(r.trim().toLowerCase());
+                    }
+                }
 
                 Shift lockedShift = lockedByKey.get(key);
                 if (lockedShift != null && lockedShift.getAssignedNurses() != null) {
@@ -379,6 +391,9 @@ public class ScheduleGenerator {
         if (t.unavailable.contains(s.date) || t.unavailable.contains(s.end.toLocalDate())) {
             return "unavailable";
         }
+        if (!s.requirements.isEmpty() && !qualified(t, s)) {
+            return "qualification";
+        }
         if (t.byDate.containsKey(s.date)) {
             return "same-day";
         }
@@ -424,6 +439,16 @@ public class ScheduleGenerator {
             }
         }
         return null;
+    }
+
+    private static boolean qualified(Timeline t, Slot s) {
+        Set<String> has = new HashSet<>();
+        if (t.nurse.getSpecializations() != null) {
+            for (String spec : t.nurse.getSpecializations()) {
+                if (spec != null) has.add(spec.trim().toLowerCase());
+            }
+        }
+        return has.containsAll(s.requirements);
     }
 
     private static boolean sameGroup(Slot other, Slot s) {

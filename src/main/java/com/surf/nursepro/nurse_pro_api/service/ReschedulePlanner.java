@@ -108,10 +108,14 @@ public class ReschedulePlanner {
 
         Map<String, Shift> existingByKey = new LinkedHashMap<>();
         Map<String, Integer> requiredStaff = new HashMap<>();
+        Map<String, Collection<String>> requirements = new HashMap<>();
         for (Shift shift : inRange) {
             String key = ScheduleGenerator.slotKey(shift.getDate(), shift.getType());
             existingByKey.put(key, shift);
             requiredStaff.put(key, shift.getRequiredStaff());
+            if (shift.getRequirements() != null && !shift.getRequirements().isEmpty()) {
+                requirements.put(key, shift.getRequirements());
+            }
         }
 
         boolean rebuild = in.getMode() == RescheduleMode.REBUILD_RANGE;
@@ -134,6 +138,7 @@ public class ReschedulePlanner {
         request.setLocked(locked);
         request.setExcludedNurseIds(excluded);
         request.setRequiredStaffBySlot(requiredStaff);
+        request.setRequirementsBySlot(requirements);
         request.setFillToMaximum(rebuild);
         if (!rebuild) {
             // gap filling never invents shifts; it only staffs the ones that exist
