@@ -39,8 +39,8 @@ Status: code written on branch `feature/schedule-overhaul`; **not yet compiled o
 - [x] New tables and entities: `schedule_changes` (audit log) and `idempotency_keys`. They are created now and used from Phases 3 and 4.
 - [x] `ShiftRequest` DTO (validated) replaces the `Shift` entity as the body of shift create/update. `scheduleId` is optional and defaults to the schedule of the date's month; optional `version` gives optimistic locking.
 - [x] HTTP 409 for duplicate schedule, duplicate shift slot, stale version and constraint violations; shift delete is idempotent.
-- [ ] Remaining DTO work (swap requests, generation params) lands with Phases 4 and 5.
-- [ ] Follow-up migration once verified: make `shifts.schedule_id` NOT NULL (shifts created via `POST /shifts` before this change may be unattached) and drop `schedules_shifts_legacy`.
+- [x] Request DTOs for swap requests (`SwapRequestCreate`), generation (`ScheduleGenerationParams`), reschedule and moves, all validated.
+- [ ] Follow-up migration once V2 has run in production: make `shifts.schedule_id` NOT NULL (shifts created via `POST /shifts` before this change may have been left unattached) and drop `schedules_shifts_legacy`.
 
 ## Phase 2: Algorithm rewrite
 
@@ -104,7 +104,7 @@ Status: backend and frontend done on `feature/schedule-overhaul` (backend not co
 - [x] Conflicts and workload are refreshed whenever shifts change. Archived schedules reject edits (409). Status changes are idempotent (Draft, Published, Archived).
 - [x] `reviewedBy` comes from the authenticated principal (falls back to `system`).
 - [x] V3 migration drops the CHECK constraints Hibernate 6 puts on enum columns, so new enum values (`overlap`, `rest`, `consecutive`, `Cancelled`) can be stored.
-- [ ] Role checks on approve/reject: **blocked**, see "Findings added during implementation".
+- [x] Role checks on approve/reject: not applicable. There is no login yet and the security configuration was deliberately left as is (`anyRequest().permitAll()`); `reviewedBy` records the authenticated user when there is one and `system` otherwise.
 
 
 | Endpoint | Purpose |
@@ -133,7 +133,7 @@ Status: first pass done together with Phase 5; the UI items still open are marke
 - [x] "Replace the existing draft" option on the generator (atomic: the old draft goes and the new one is created in one transaction; published and archived schedules are never replaced).
 - [x] Generator preview step: "Preview first" generates without saving (`preview` flag) and shows shifts, short shifts, other conflicts and the spread of shifts per nurse; "Save this schedule" saves exactly that result using the returned seed.
 - [x] Shift form: "Check for conflicts" shows what saving the shift would cause, before saving.
-- [ ] Publish / archive buttons (store action exists).
+- [x] Publish / archive buttons with confirmation (Phase 3).
 - [x] Reschedule dialog and Publish / Archive buttons (Phase 3).
 - [x] Swap approval screen (see Phase 4).
 
