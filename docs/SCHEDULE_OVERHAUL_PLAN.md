@@ -54,7 +54,8 @@ Status: done on `feature/schedule-overhaul`. `ScheduleGenerator` replaces the da
 - [x] Ready for Phase 3: the request supports `locked` shifts (kept as they are), `excludedNurseIds`, a partial date range, and `history`.
 - Measured on a 30-day month: 10+ identical nurses fill every shift with at most one shift of difference between nurses; 8 nurses leave 8 positions short (capacity at 40h/week is below the minimum demand); 80 nurses generate in well under a second.
 - Behaviour to know: shifts are filled towards `maxNursesPerShift` (as before), limited by the weekly hours cap, so the roster is used as fully as the caps allow.
-- [ ] Not yet used by the generator: `rules` from the request, shift `requirements` vs nurse `specializations`, and department matching (single "General" department).
+- [x] Shift `requirements` are matched against nurse `specializations` (case-insensitive, all required) when filling existing shifts; the validator reports `qualification` conflicts for manual assignments.
+- [ ] Deliberately not implemented: the request's `rules` list (its meaning for the generator was never specified) and matching nurse department to shift department (departments are free text and generated shifts are all "General").
 
 ## Phase 3: Rescheduling
 
@@ -69,7 +70,7 @@ Status: backend and frontend done on `feature/schedule-overhaul`. The planning l
 - [x] Changing a nurse's availability re-checks the conflicts of the open schedules where they still have upcoming shifts. Deleting a nurse who still has upcoming shifts returns 409 asking to reschedule first (soft delete was not added).
 - [x] Frontend: a Reschedule dialog (range, mode, excluded nurses, reason, preview, apply) and Publish / Archive buttons with confirmation and a status badge on the schedule page.
 - [x] The constraints a schedule was generated with are stored on it (V5), so conflict checks, previews, swaps and reschedules use the same rules; a reschedule request may override them.
-- [ ] Audit log viewer in the UI (`fetchScheduleChanges` exists in the store).
+- [x] History button and modal on the schedule page (audit log).
 
 ## Phase 4: Swaps, idempotency, duplicates
 
@@ -82,7 +83,7 @@ Status: backend and frontend done on `feature/schedule-overhaul` (backend not co
 - [x] `Idempotency-Key` on generate: same key and same request returns the original schedule; same key with a different request is a 409; keys expire after 24 hours. The generator sends one key per attempt and renews it when the form changes.
 - [x] Atomic move endpoint (`POST /schedules/shifts/move`) replaces the two separate updates behind drag and drop; repeating a completed move is a no-op.
 - [x] Client retries only GET/HEAD/OPTIONS.
-- [ ] Swap approval screen showing the validation result, and a cancel button in the UI (the store action exists).
+- [x] Swap screen: the details view asks the server whether the swap can be approved right now (`GET /swap-requests/{id}/check`) and shows why not; Approve is disabled when it cannot; Cancel / Withdraw buttons added. Server errors are no longer replaced by a generic toast.
 
 
 - Swap state machine: Pending to Approved / Rejected / Cancelled; invalid transitions return 409.
@@ -130,11 +131,11 @@ Status: first pass done together with Phase 5; the UI items still open are marke
 - [x] Schedule editor uses server conflicts instead of its local mock.
 - [x] Export fallback filename uses `.xlsx` for Excel.
 - [x] "Replace the existing draft" option on the generator (atomic: the old draft goes and the new one is created in one transaction; published and archived schedules are never replaced).
-- [ ] Generator preview step (generate-as-preview before saving).
-- [ ] Shift form: show `previewShift` results before saving.
+- [x] Generator preview step: "Preview first" generates without saving (`preview` flag) and shows shifts, short shifts, other conflicts and the spread of shifts per nurse; "Save this schedule" saves exactly that result using the returned seed.
+- [x] Shift form: "Check for conflicts" shows what saving the shift would cause, before saving.
 - [ ] Publish / archive buttons (store action exists).
 - [x] Reschedule dialog and Publish / Archive buttons (Phase 3).
-- [ ] Swap approval screen (Phase 4).
+- [x] Swap approval screen (see Phase 4).
 
 
 - Types: dates as ISO strings, `scheduleId`, real conflict shape, unified constraints.
@@ -157,16 +158,20 @@ Status: done where it can be done without a running database; covered by unit te
 - [x] Nurse deletion with upcoming shifts is blocked (409); availability changes re-check open schedules.
 - [x] Nurse on-duty status: handled night shifts that cross midnight, uses local time instead of the server's timezone (`app.timezone`, default `Africa/Lagos`), and no longer loads every shift.
 - [x] Unavailable dates: the nurse form now has an editor (there was none, so the availability rules could never be exercised from the UI); dates are plain `yyyy-MM-dd` strings, avoiding the UTC off-by-one.
-- [ ] Known and not changed: the nurse list filter by specialization applies `lower()` to a collection and probably fails at runtime; the nurse form still has pre-existing type errors; `Nurse.department` and shift departments are not matched (single "General" department).
+- [x] The nurse list filter by specialization applied `lower()` to a collection; it now joins the collection.
+- [ ] Known and not changed: the frontend still has 37 type errors that predate this work (`npx tsc -p tsconfig.app.json`; `npm run build` does not type-check); departments are not matched (see Phase 2).
 
 ## Phase 8: Tests
 
-Status: unit tests done; integration tests and the contract check are not.
+Status: done. CI runs everything on every push to a branch and on pull requests (GitHub Actions, Postgres 17 service).
 
-- [x] 53 unit tests (JUnit 5, no Spring context, no database): `ScheduleValidator` (every rule), `ScheduleGenerator` (an independent re-check of every hard rule across seeds, a leap-year February, 30- and 31-day months, determinism, continuity, locked shifts, excluded nurses, speed), `ReschedulePlanner`, `SwapPlanner`, `ShiftTimes`.
-- [x] CI: `.github/workflows` in both repos (`mvn test` on Java 17; `npm run build` on Node 20).
-- [ ] Testcontainers integration tests: concurrent double-generate yields exactly one schedule, swap approve/reject races, migrations V1 to V5 on a copy of real data. These need Docker and a database and have not been written.
-- [ ] Contract check: generate the TypeScript types from the springdoc OpenAPI spec and fail CI when they are stale (needs the backend running in CI).
+- [x] 67 backend tests, all passing in CI on real Spring Boot and PostgreSQL:
+  - Unit tests (no Spring, no database): `ScheduleValidator` (every rule, including qualifications), `ScheduleGenerator` (an independent re-check of every hard rule across seeds, a leap-year February, 30- and 31-day months, determinism, continuity, locked shifts, excluded nurses, speed), `ReschedulePlanner`, `SwapPlanner`, `ShiftTimes`.
+  - `NurseProApiApplicationTests`: the whole application starts, Flyway migrates an empty database, and Hibernate (`ddl-auto: validate`) checks every entity against the migrated schema.
+  - `ScheduleApiIntegrationTest` over HTTP against PostgreSQL: concurrent generate for one month creates exactly one schedule (the rest get 409); an `Idempotency-Key` retry returns the first schedule and a reused key with a different request is a 409; preview saves nothing and saving with the returned seed gives the same shifts; an existing draft is only replaced when asked; a second shift in the same slot is a 409; four concurrent approvals of one swap swap once and later approve/reject calls are no-ops or 409; reschedule needs the preview's revision, removes the excluded nurse, goes stale after applying and is written to the audit log; a nurse with upcoming shifts cannot be deleted; the OpenAPI document lists every route the frontend calls.
+- [x] `scripts/verify-migrations.sh` (run in CI): migrations on a scratch PostgreSQL database with dirty legacy data, and every new constraint.
+- [x] Frontend CI: `npm run build`.
+- [ ] Generating the TypeScript types from the OpenAPI document (and failing CI when they are stale) was not done: the types are still hand-written. The integration test guards the part that broke before (routes the frontend calls that do not exist), not field names.
 
 ## Findings added during implementation
 
