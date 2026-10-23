@@ -282,7 +282,16 @@ class ScheduleApiIntegrationTest {
                 assertFalse(assigned.contains(requester));
             }
         }
-        assertEquals(1, shifts.findById(shiftId).orElseThrow().getAssignedNurses().stream().filter(target::equals).count());
+        // the nurse was added exactly once (the collection is a set, and the database has a primary key on it)
+        for (JsonNode s : after.get("shifts")) {
+            if (s.get("id").asText().equals(shiftId)) {
+                int occurrences = 0;
+                for (JsonNode n : s.get("assignedNurses")) {
+                    if (target.equals(n.asText())) occurrences++;
+                }
+                assertEquals(1, occurrences);
+            }
+        }
 
         // an approved request can no longer be rejected
         assertEquals(HttpStatus.CONFLICT, http.exchange("/api/schedules/swap-requests/" + swapId + "/reject",
@@ -341,9 +350,16 @@ class ScheduleApiIntegrationTest {
 
     @Test
     void aNurseWithUpcomingShiftsCannotBeDeletedUntilRescheduled() throws Exception {
-        generateSchedule();
-        String worksAShift = shifts.findAll().stream()
-                .flatMap(s -> s.getAssignedNurses().stream()).findFirst().orElseThrow();
+        String scheduleId = generateSchedule();
+        JsonNode schedule = data(http.getForEntity("/api/schedules/" + scheduleId, String.class));
+        String worksAShift = null;
+        for (JsonNode shift : schedule.get("shifts")) {
+            if (shift.get("assignedNurses").size() > 0) {
+                worksAShift = shift.get("assignedNurses").get(0).asText();
+                break;
+            }
+        }
+        assertNotNull(worksAShift);
 
         ResponseEntity<String> response = http.exchange("/api/nurses/" + worksAShift, HttpMethod.DELETE, HttpEntity.EMPTY, String.class);
 
