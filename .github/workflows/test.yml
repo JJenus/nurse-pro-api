@@ -41,5 +41,18 @@ jobs:
           PGPASSWORD: postgres
           PSQL_ARGS: -h localhost -U postgres
         run: scripts/verify-migrations.sh
-      - name: Unit tests and application context (Flyway + Hibernate validate on PostgreSQL)
-        run: ./mvnw -B -ntp test
+      - name: Unit tests, integration tests and application context (Flyway + Hibernate validate on PostgreSQL)
+        shell: bash
+        run: |
+          set -o pipefail
+          ./mvnw -B -ntp test 2>&1 | tee mvn.log
+      - name: Show failures as annotations
+        if: failure()
+        shell: bash
+        run: |
+          {
+            grep -E "ERROR|FAIL|Caused by|Tests run:.*Fail" mvn.log | head -60
+            echo "--- surefire reports"
+            grep -h -B1 -A12 -E "<<< (FAILURE|ERROR)" target/surefire-reports/*.txt 2>/dev/null | head -150
+          } | cut -c1-600 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' > annotation.txt
+          echo "::error title=Maven failure::$(cat annotation.txt | head -c 60000)"
